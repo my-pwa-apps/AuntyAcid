@@ -690,6 +690,47 @@ input[type="date"] {
 	color: #fff;
 }
 
+.notification-action {
+	background: rgba(255, 255, 255, 0.2);
+	border: 1px solid rgba(255, 255, 255, 0.5);
+	border-radius: 8px;
+	color: #fff;
+	cursor: pointer;
+	font-size: 13px;
+	font-weight: 600;
+	padding: 6px 12px;
+	flex-shrink: 0;
+	transition: var(--transition-fast);
+}
+
+.notification-action:hover {
+	background: rgba(255, 255, 255, 0.3);
+}
+
+.notification-action[hidden] {
+	display: none;
+}
+
+.icon-button:focus-visible,
+.settings-close:focus-visible,
+.backup-button:focus-visible,
+.notification-close:focus-visible,
+.notification-action:focus-visible {
+	outline: 3px solid purple;
+	outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+
 /* Copyright Footer */
 .copyright-footer {
 	position: fixed;

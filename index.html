@@ -132,7 +132,8 @@
 			<line x1="12" y1="8" x2="12" y2="12"></line>
 			<line x1="12" y1="16" x2="12.01" y2="16"></line>
 		</svg>
-		<div class="notification-content" id="notificationContent"></div>
+		<div class="notification-content" id="notificationContent" role="status" aria-live="polite"></div>
+		<button class="notification-action" id="notificationAction" type="button" hidden></button>
 		<button class="notification-close" id="notificationClose" aria-label="Close notification">
 			<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 				<line x1="18" y1="6" x2="6" y2="18"></line>
@@ -197,13 +198,13 @@
 	<!-- Controls Container -->
 	<div id="controls-container">
 		<div class="settings-icons-container">
-			<button class="icon-button" id="settingsBtn" aria-label="Settings" title="Settings">
+			<button class="icon-button" id="settingsBtn" aria-label="Settings" title="Settings" aria-expanded="false" aria-controls="settingsDIV">
 				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 					<circle cx="12" cy="12" r="3"></circle>
 					<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
 				</svg>
 			</button>
-			<button class="icon-button" id="favheart" aria-label="Add to favorites" title="Favorite">
+			<button class="icon-button" id="favheart" aria-label="Add to favorites" aria-pressed="false" title="Favorite">
 				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 					<path class="favicon" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
 				</svg>
@@ -223,10 +224,10 @@
 	<button id="installBtn" class="button">Install App</button>
 	
 	<!-- Modern Floating Settings Panel -->
-	<div id="settingsDIV" class="settings-panel" aria-label="Settings" role="region">
+	<div id="settingsDIV" class="settings-panel" role="dialog" aria-labelledby="settingsTitle">
 		<div class="settings-header" id="settingsHeader">
-			<h3>Settings</h3>
-			<button class="settings-close" id="settingsCloseBtn" aria-label="Close">&times;</button>
+			<h3 id="settingsTitle">Settings</h3>
+			<button class="settings-close" id="settingsCloseBtn" aria-label="Close settings">&times;</button>
 		</div>
 		<div class="settings-content">
 			<div class="setting-item">
@@ -277,6 +278,7 @@
 		</p>
 	</footer>
 	
+	<script src="./core.js"></script>
 	<script src="./app.js"></script>
 	<!-- Cloudflare Web Analytics -->
 	<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "29d08b4b50ec43ab9db7cd3dd8e5fcc6"}'></script>

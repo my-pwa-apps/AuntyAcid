@@ -1,0 +1,13 @@
+{
+  "name": "auntyacid",
+  "private": true,
+  "description": "Aunty Acid comics PWA (static site, no build step)",
+  "scripts": {
+    "start": "node scripts/serve.js",
+    "check": "node --check core.js && node --check app.js && node --check sw.js",
+    "test": "node --test \"tests/**/*.test.js\""
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

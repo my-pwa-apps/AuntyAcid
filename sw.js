@@ -1,9 +1,14 @@
-const CACHE_NAME = 'auntyacid-v28';
+const CACHE_NAME = 'auntyacid-v29';
+// Comic images are kept across app versions so previously viewed comics work offline.
+const IMAGE_CACHE_NAME = 'auntyacid-images-v1';
+const IMAGE_CACHE_LIMIT = 150;
+const IMAGE_HOSTS = ['featureassets.gocomics.com'];
 
 // Assets to cache on install
 const PRECACHE_ASSETS = [
   './',
   './index.html',
+  './core.js',
   './app.js',
   './main.css',
   './manifest.webmanifest',
@@ -27,22 +32,57 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
       .then(keys => Promise.all(
-        keys.filter(key => key !== CACHE_NAME)
+        keys.filter(key => key !== CACHE_NAME && key !== IMAGE_CACHE_NAME)
           .map(key => caches.delete(key))
       ))
       .then(() => self.clients.claim())
   );
 });
 
+async function trimCache(cacheName, limit) {
+  const cache = await caches.open(cacheName);
+  const keys = await cache.keys();
+  await Promise.all(keys.slice(0, Math.max(0, keys.length - limit)).map(key => cache.delete(key)));
+}
+
+// Comic images are immutable per URL: cache-first, only CORS (non-opaque) successful responses.
+function handleComicImage(event) {
+  event.respondWith(
+    caches.open(IMAGE_CACHE_NAME).then(cache =>
+      cache.match(event.request).then(cached => {
+        if (cached) return cached;
+        return fetch(event.request).then(response => {
+          if (response.ok && response.type === 'cors') {
+            const copy = response.clone();
+            event.waitUntil(
+              cache.put(event.request, copy)
+                .then(() => trimCache(IMAGE_CACHE_NAME, IMAGE_CACHE_LIMIT))
+                .catch(() => {})
+            );
+          }
+          return response;
+        });
+      })
+    )
+  );
+}
+
 // Fetch event - serve from cache, fallback to network
 self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return;
+
   const url = new URL(event.request.url);
-  
-  // Skip cross-origin requests
+
+  if (IMAGE_HOSTS.includes(url.hostname) && event.request.mode === 'cors') {
+    handleComicImage(event);
+    return;
+  }
+
+  // Skip other cross-origin requests (CORS proxy, analytics)
   if (url.origin !== self.location.origin) {
     return;
   }
-  
+
   // Handle navigation requests (HTML pages) - always serve index.html for SPA
   if (event.request.mode === 'navigate') {
     event.respondWith(
@@ -54,7 +94,7 @@ self.addEventListener('fetch', (event) => {
               fetch('./index.html')
                 .then(response => {
                   if (response && response.status === 200) {
-                    caches.open(CACHE_NAME)
+                    return caches.open(CACHE_NAME)
                       .then(cache => cache.put('./index.html', response));
                   }
                 })
@@ -68,7 +108,7 @@ self.addEventListener('fetch', (event) => {
     );
     return;
   }
-  
+
   event.respondWith(
     caches.match(event.request)
       .then(cachedResponse => {
@@ -79,7 +119,7 @@ self.addEventListener('fetch', (event) => {
               .then(response => {
                 if (response && response.status === 200) {
                   const responseClone = response.clone();
-                  caches.open(CACHE_NAME)
+                  return caches.open(CACHE_NAME)
                     .then(cache => cache.put(event.request, responseClone));
                 }
               })
@@ -87,18 +127,18 @@ self.addEventListener('fetch', (event) => {
           );
           return cachedResponse;
         }
-        
+
         // Not in cache - fetch from network
         return fetch(event.request)
           .then(response => {
             if (!response || response.status !== 200) {
               return response;
             }
-            
+
             const responseClone = response.clone();
             caches.open(CACHE_NAME)
               .then(cache => cache.put(event.request, responseClone));
-            
+
             return response;
           });
       })

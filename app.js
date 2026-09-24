@@ -4,145 +4,206 @@
 if ('serviceWorker' in navigator) {
 	window.addEventListener('load', () => {
 		navigator.serviceWorker.register('./sw.js', { scope: './' })
-			.then(reg => console.log('SW registered'))
-			.catch(err => console.log('SW registration failed'));
+			.catch(() => {});
 	});
 }
 
-// Global variables
-let currentselectedDate, formattedComicDate, formattedDate;
-let year, month, day;
-let pictureUrl = '';
-let previousUrl = '';
-let previousclicked = false;
-let deferredPrompt = null;
+const Core = window.AuntyAcidCore;
 
-const START_DATE = new Date('2013-05-06');
+const START_DATE = Core.parseYmd('2013-05-06');
 const CORS_PROXY = 'https://corsproxy.garfieldapp.workers.dev/cors-proxy?';
+const IMAGE_URL_CACHE_KEY = 'imageUrls';
+const IMAGE_URL_CACHE_LIMIT = 500;
+const MAX_SAME_IMAGE_SKIPS = 7;
 
-/**
- * Preload adjacent comic images for faster navigation
- * @param {Date} currentDate - Current comic date
- */
-function preloadAdjacentComics(currentDate) {
-	const today = new Date();
-	today.setHours(0, 0, 0, 0);
-	
-	// Preload previous comic (if not before start date)
-	const prevDate = new Date(currentDate);
-	prevDate.setDate(prevDate.getDate() - 1);
-	if (prevDate >= START_DATE) {
-		const y = prevDate.getFullYear();
-		const m = String(prevDate.getMonth() + 1).padStart(2, '0');
-		const d = String(prevDate.getDate()).padStart(2, '0');
-		const prevUrl = `${CORS_PROXY}https://www.gocomics.com/aunty-acid/${y}/${m}/${d}`;
-		
-		fetch(prevUrl)
-			.then(response => response.text())
-			.then(text => {
-				const imageUrl = extractComicImageUrl(text);
-				if (imageUrl) {
-					const img = new Image();
-					img.src = imageUrl;
-				}
-			})
-			.catch(() => {}); // Silently ignore errors
-	}
-	
-	// Preload next comic (if not after today)
-	const nextDate = new Date(currentDate);
-	nextDate.setDate(nextDate.getDate() + 1);
-	if (nextDate <= today) {
-		const y = nextDate.getFullYear();
-		const m = String(nextDate.getMonth() + 1).padStart(2, '0');
-		const d = String(nextDate.getDate()).padStart(2, '0');
-		const nextUrl = `${CORS_PROXY}https://www.gocomics.com/aunty-acid/${y}/${m}/${d}`;
-		
-		fetch(nextUrl)
-			.then(response => response.text())
-			.then(text => {
-				const imageUrl = extractComicImageUrl(text);
-				if (imageUrl) {
-					const img = new Image();
-					img.src = imageUrl;
-				}
-			})
-			.catch(() => {}); // Silently ignore errors
-	}
-}
-
-/**
- * Extract comic image URL from GoComics HTML
- * @param {string} text - HTML content
- * @returns {string|null} Image URL or null
- */
-function extractComicImageUrl(text) {
-	// Try featureassets CDN (current GoComics CDN)
-	let match = text.match(/https:\/\/featureassets\.gocomics\.com\/assets\/[a-f0-9]+/);
-	if (match) return match[0];
-	
-	// Try amuniversal CDN (legacy)
-	match = text.match(/https:\/\/assets\.amuniversal\.com\/[a-f0-9]+/);
-	if (match) return match[0];
-	
-	// Try og:image meta tag
-	match = text.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i);
-	if (match && match[1] && (match[1].includes('gocomics') || match[1].includes('amuniversal'))) {
-		return match[1];
-	}
-	
-	// Fallback to picture tag
-	match = text.match(/<picture[^>]*>[\s\S]*?<img[^>]*src="([^"]*)"[^>]*>[\s\S]*?<\/picture>/i);
-	if (match && match[1]) return match[1];
-	
-	return null;
-}
+// Date the user asked for (drives navigation and the date picker while a load is pending)
+let selectedDate = null;
+// Date whose comic is currently on screen (drives favorites, sharing and lastcomic)
+let displayedDate = null;
+let pictureUrl = '';
+let loadSequence = 0;
+let deferredPrompt = null;
+let notificationTimer = null;
 
 // Helper functions
 const $ = (id) => document.getElementById(id);
-const getFavs = () => JSON.parse(localStorage.getItem('favs')) || [];
+const todayDate = () => Core.startOfDay(new Date());
+const getFavs = () => Core.sanitizeFavorites(Core.safeJsonParse(localStorage.getItem('favs'), []), START_DATE, null).favorites;
 const setFavs = (favs) => localStorage.setItem('favs', JSON.stringify(favs));
+const isFavoritesMode = () => !!$('showfavs')?.checked;
 
-function updateFavIcon(isFavorite) {
-	const favicon = document.querySelector('.favicon');
-	if (favicon) {
-		favicon.setAttribute('fill', isFavorite ? 'currentColor' : 'none');
+class ComicLoadError extends Error {
+	constructor(kind, status) {
+		super(kind);
+		this.kind = kind; // 'offline' | 'http' | 'no-image' | 'image' | 'network'
+		this.status = status;
 	}
 }
 
-function formatDate(datetoFormat) {
-	day = String(datetoFormat.getDate()).padStart(2, '0');
-	month = String(datetoFormat.getMonth() + 1).padStart(2, '0');
-	year = datetoFormat.getFullYear();
+// ========================================
+// COMIC IMAGE URL LOOKUP (cached + deduplicated)
+// ========================================
+
+// Comic asset URLs never change for a date, so they are cached (and persisted for offline use).
+const imageUrlCache = new Map(Object.entries(Core.safeJsonParse(localStorage.getItem(IMAGE_URL_CACHE_KEY), {}))
+	.filter(([date, url]) => Core.isValidFavorite(date) && Core.isComicImageUrl(url)));
+const inflightLookups = new Map();
+
+function persistImageUrls() {
+	// Today's page may still change (late publishing), so it is only cached in memory.
+	const persistable = [...imageUrlCache].filter(([date]) => date !== Core.toYmd(todayDate()));
+	try {
+		localStorage.setItem(IMAGE_URL_CACHE_KEY, JSON.stringify(Object.fromEntries(persistable)));
+	} catch {
+		// Storage full - the in-memory cache still works
+	}
+}
+
+function rememberImageUrl(ymd, url) {
+	imageUrlCache.delete(ymd);
+	imageUrlCache.set(ymd, url);
+	while (imageUrlCache.size > IMAGE_URL_CACHE_LIMIT) {
+		imageUrlCache.delete(imageUrlCache.keys().next().value);
+	}
+	persistImageUrls();
+}
+
+function forgetImageUrl(ymd) {
+	if (imageUrlCache.delete(ymd)) persistImageUrls();
+}
+
+function getComicImageUrl(ymd) {
+	if (imageUrlCache.has(ymd)) return Promise.resolve(imageUrlCache.get(ymd));
+	if (inflightLookups.has(ymd)) return inflightLookups.get(ymd);
+
+	const lookup = fetch(`${CORS_PROXY}https://www.gocomics.com/aunty-acid/${ymd}`)
+		.catch(() => {
+			throw new ComicLoadError(navigator.onLine === false ? 'offline' : 'network');
+		})
+		.then(response => {
+			if (!response.ok) throw new ComicLoadError('http', response.status);
+			return response.text();
+		})
+		.then(html => {
+			const url = Core.extractComicImageUrl(html);
+			if (!url) throw new ComicLoadError('no-image');
+			rememberImageUrl(ymd, url);
+			return url;
+		})
+		.finally(() => inflightLookups.delete(ymd));
+
+	inflightLookups.set(ymd, lookup);
+	return lookup;
+}
+
+function applyImageSource(img, url) {
+	// featureassets serves CORS headers; loading in CORS mode lets the SW cache real (non-opaque)
+	// responses and lets sharing read the pixels.
+	if (url.startsWith('https://featureassets.gocomics.com/')) {
+		img.crossOrigin = 'anonymous';
+	} else {
+		img.removeAttribute('crossorigin');
+	}
+	img.src = url;
+}
+
+// Resolves once the image is decodable (from network, HTTP cache or the SW image cache)
+function loadImage(url) {
+	return new Promise((resolve, reject) => {
+		const img = new Image();
+		img.onload = () => resolve(url);
+		img.onerror = () => reject(new ComicLoadError(navigator.onLine === false ? 'offline' : 'image'));
+		applyImageSource(img, url);
+	});
+}
+
+function preloadComic(date) {
+	getComicImageUrl(Core.toYmd(date))
+		.then(url => applyImageSource(new Image(), url))
+		.catch(() => {});
+}
+
+function preloadAdjacentComics(date) {
+	const previous = Core.addDays(date, -1);
+	const next = Core.addDays(date, 1);
+	if (previous >= START_DATE) preloadComic(previous);
+	if (next <= todayDate()) preloadComic(next);
+}
+
+// ========================================
+// UI HELPERS
+// ========================================
+
+function formatLongDate(date) {
+	return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
+function updateFavIcon(isFavorite) {
+	document.querySelector('.favicon')?.setAttribute('fill', isFavorite ? 'currentColor' : 'none');
+	const favButton = $('favheart');
+	if (favButton) {
+		favButton.setAttribute('aria-pressed', String(isFavorite));
+		favButton.setAttribute('aria-label', isFavorite ? 'Remove from favorites' : 'Add to favorites');
+	}
 }
 
 // Notification Toast System
-function showNotification(message, duration = 3000) {
+function showNotification(message, duration = 3000, action = null) {
 	const toast = $('notificationToast');
-	const content = toast.querySelector('.notification-content');
+	const content = $('notificationContent');
+	const actionButton = $('notificationAction');
+	if (!toast) return;
 	if (content) content.textContent = message;
+
+	if (actionButton) {
+		actionButton.hidden = !action;
+		actionButton.onclick = null;
+		if (action) {
+			actionButton.textContent = action.label;
+			actionButton.onclick = () => {
+				hideNotification();
+				action.handler();
+			};
+		}
+	}
+
 	toast.classList.add('show');
-	
+	clearTimeout(notificationTimer);
 	if (duration > 0) {
-		setTimeout(() => hideNotification(), duration);
+		notificationTimer = setTimeout(hideNotification, duration);
 	}
 }
 
 function hideNotification() {
-	const toast = $('notificationToast');
-	toast.classList.remove('show');
+	clearTimeout(notificationTimer);
+	$('notificationToast')?.classList.remove('show');
 }
 
 // Settings Panel
 function toggleSettings() {
-	const panel = document.querySelector('.settings-panel');
-	panel.classList.toggle('visible');
-	updateExportButtonState();
+	const panel = $('settingsDIV');
+	if (panel?.classList.contains('visible')) {
+		hideSettings();
+	} else {
+		showSettings();
+	}
 }
 
-function hideSettings() {
-	const panel = document.querySelector('.settings-panel');
+function showSettings() {
+	const panel = $('settingsDIV');
+	if (!panel) return;
+	panel.classList.add('visible');
+	$('settingsBtn')?.setAttribute('aria-expanded', 'true');
+	updateExportButtonState();
+	$('swipe')?.focus();
+}
+
+function hideSettings({ restoreFocus = false } = {}) {
+	const panel = $('settingsDIV');
+	if (!panel?.classList.contains('visible')) return;
 	panel.classList.remove('visible');
+	$('settingsBtn')?.setAttribute('aria-expanded', 'false');
+	if (restoreFocus) $('settingsBtn')?.focus();
 }
 
 // ========================================
@@ -272,8 +333,7 @@ function clampToolbarInView() {
 	}
 	
 	// Custom position mode - maintain relative positioning
-	const savedPosRaw = localStorage.getItem('toolbarPos');
-	const savedPos = savedPosRaw ? JSON.parse(savedPosRaw) : null;
+	const savedPos = Core.safeJsonParse(localStorage.getItem('toolbarPos'), null);
 	
 	if (!savedPos) {
 		// No saved position - center between logo and comic
@@ -332,9 +392,6 @@ function clampToolbarInView() {
 				toolbar.style.top = newTop + 'px';
 				toolbar.style.left = newLeft + 'px';
 				toolbar.style.transform = 'none';
-				
-				// Preserve metadata
-				const overrides = savedPos.belowComic ? { belowComic: true, offsetFromComic: savedPos.offsetFromComic || 15 } : {};
 				storeToolbarPosition(newTop, newLeft, toolbar);
 			}
 		});
@@ -380,8 +437,7 @@ function initializeToolbar() {
 	if (!toolbar) return;
 	
 	// Check for saved position
-	const savedPosRaw = localStorage.getItem('toolbarPos');
-	const savedPos = savedPosRaw ? JSON.parse(savedPosRaw) : null;
+	const savedPos = Core.safeJsonParse(localStorage.getItem('toolbarPos'), null);
 	const isOptimalMode = localStorage.getItem('toolbarOptimal') === 'true';
 	
 	if (savedPos && typeof savedPos.top === 'number') {
@@ -528,11 +584,11 @@ function makeDraggable(element) {
 	document.addEventListener('touchend', onEnd);
 }
 
+
 function updateExportButtonState() {
 	const exportBtn = $('exportFavs');
-	const favs = getFavs();
 	if (exportBtn) {
-		exportBtn.disabled = favs.length === 0;
+		exportBtn.disabled = getFavs().length === 0;
 	}
 }
 
@@ -543,62 +599,62 @@ function exportFavorites() {
 		showNotification('No favorites to export!');
 		return;
 	}
-	
+
 	const data = {
 		app: 'AuntyAcid',
 		version: '1.0',
 		exportDate: new Date().toISOString(),
 		favorites: favs
 	};
-	
+
 	const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
 	const url = URL.createObjectURL(blob);
 	const a = document.createElement('a');
 	a.href = url;
-	a.download = `auntyacid-favorites-${new Date().toISOString().split('T')[0]}.json`;
+	a.download = `auntyacid-favorites-${Core.toYmd(new Date(), '-')}.json`;
 	document.body.appendChild(a);
 	a.click();
 	document.body.removeChild(a);
 	URL.revokeObjectURL(url);
-	
+
 	showNotification(`Exported ${favs.length} favorite(s)!`);
 }
 
 function importFavorites() {
-	const input = $('importFile');
-	if (input) input.click();
+	$('importFile')?.click();
 }
 
 function handleImportFile(event) {
 	const file = event.target.files[0];
 	if (!file) return;
-	
+
 	const reader = new FileReader();
 	reader.onload = (e) => {
-		try {
-			const data = JSON.parse(e.target.result);
-			
-			if (!data.favorites || !Array.isArray(data.favorites)) {
-				showNotification('Invalid favorites file format!');
-				return;
-			}
-			
-			const currentFavs = getFavs();
-			const newFavs = [...new Set([...currentFavs, ...data.favorites])].sort();
-			setFavs(newFavs);
-			
-			const importedCount = newFavs.length - currentFavs.length;
-			showNotification(`Imported ${importedCount} new favorite(s)! Total: ${newFavs.length}`);
-			
-			// Update UI
-			$('showfavs').disabled = newFavs.length === 0;
-			updateExportButtonState();
-			CompareDates();
-			showComic();
-		} catch (err) {
-			showNotification('Error reading favorites file!');
+		const data = Core.safeJsonParse(e.target.result, null);
+		if (!data || !Array.isArray(data.favorites)) {
+			showNotification('Invalid favorites file format!');
+			return;
 		}
+
+		const { favorites: imported, rejected } = Core.sanitizeFavorites(data.favorites, START_DATE, todayDate());
+		if (imported.length === 0) {
+			showNotification('No valid favorites found in this file.');
+			return;
+		}
+
+		const currentFavs = getFavs();
+		const newFavs = [...new Set([...currentFavs, ...imported])].sort();
+		setFavs(newFavs);
+
+		const importedCount = newFavs.length - currentFavs.length;
+		const skipped = rejected ? ` Skipped ${rejected} invalid entr${rejected === 1 ? 'y' : 'ies'}.` : '';
+		showNotification(`Imported ${importedCount} new favorite(s)! Total: ${newFavs.length}.${skipped}`, 4000);
+
+		if (displayedDate) updateFavIcon(newFavs.includes(Core.toYmd(displayedDate)));
+		updateExportButtonState();
+		updateNavState();
 	};
+	reader.onerror = () => showNotification('Error reading favorites file!');
 	reader.readAsText(file);
 	event.target.value = '';
 }
@@ -619,410 +675,481 @@ function showInstallButton() {
 
 async function handleInstall() {
 	if (!deferredPrompt) return;
-	
+
 	deferredPrompt.prompt();
 	const { outcome } = await deferredPrompt.userChoice;
-	
+
 	if (outcome === 'accepted') {
 		showNotification('App installed successfully!');
 	}
-	
+
 	deferredPrompt = null;
 	const installBtn = $('installBtn');
 	if (installBtn) installBtn.style.display = 'none';
 }
 
-// Share functionality
-async function Share() {
-	if (!navigator.share) {
-		showNotification('Sharing not supported on this device');
-		return;
+// ========================================
+// SHARING
+// ========================================
+
+function comicShareUrl(date) {
+	const url = new URL('./', window.location.href);
+	url.searchParams.set('date', Core.toYmd(date, '-'));
+	return url.toString();
+}
+
+async function fetchComicFile(url, date) {
+	const controller = new AbortController();
+	// Keep this short: navigator.share() needs the user activation that started the click.
+	const timeout = setTimeout(() => controller.abort(), 3000);
+	try {
+		const response = await fetch(url, { mode: 'cors', signal: controller.signal });
+		if (!response.ok) return null;
+		const blob = await response.blob();
+		const type = blob.type || 'image/jpeg';
+		const extension = type.includes('png') ? 'png' : type.includes('gif') ? 'gif' : 'jpg';
+		return new File([blob], `aunty-acid-${Core.toYmd(date, '-')}.${extension}`, { type });
+	} catch {
+		return null;
+	} finally {
+		clearTimeout(timeout);
 	}
-	
-	if (!pictureUrl) {
+}
+
+async function copyShareLink(url) {
+	try {
+		await navigator.clipboard.writeText(url);
+		showNotification('Link to this comic copied to clipboard!');
+	} catch {
+		showNotification(`Couldn't share automatically. Link: ${url}`, 8000);
+	}
+}
+
+async function Share() {
+	if (!displayedDate || !pictureUrl) {
 		showNotification('No comic to share. Please load a comic first.');
 		return;
 	}
-	
+
+	const shareUrl = comicShareUrl(displayedDate);
+	const title = `Aunty Acid - ${formatLongDate(displayedDate)}`;
+
+	if (!navigator.share) {
+		await copyShareLink(shareUrl);
+		return;
+	}
+
 	try {
-		// Load image into canvas to handle CORS and create shareable blob
-		const tempImg = new Image();
-		tempImg.crossOrigin = 'anonymous';
-		
-		// Try loading directly first, then via proxy
-		await new Promise((resolve, reject) => {
-			const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
-			tempImg.onload = () => { clearTimeout(timeout); resolve(); };
-			tempImg.onerror = () => { clearTimeout(timeout); reject(new Error('Load failed')); };
-			tempImg.src = pictureUrl;
-		}).catch(async () => {
-			// Try with CORS proxy on failure
-			const proxyUrl = `${CORS_PROXY}${encodeURIComponent(pictureUrl)}`;
-			return new Promise((resolve, reject) => {
-				const timeout = setTimeout(() => reject(new Error('Proxy timeout')), 5000);
-				tempImg.onload = () => { clearTimeout(timeout); resolve(); };
-				tempImg.onerror = () => { clearTimeout(timeout); reject(new Error('Proxy failed')); };
-				tempImg.src = proxyUrl;
-			});
-		});
-		
-		// Convert image to blob via canvas
-		const canvas = document.createElement('canvas');
-		canvas.width = tempImg.width;
-		canvas.height = tempImg.height;
-		canvas.getContext('2d').drawImage(tempImg, 0, 0);
-		
-		const blob = await new Promise((resolve, reject) => {
-			canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Blob creation failed')), 'image/jpeg', 0.95);
-		});
-		
-		// Share with file
-		const file = new File([blob], 'auntyacid.jpg', { type: 'image/jpeg', lastModified: Date.now() });
-		await navigator.share({
-			url: 'https://auntyacidapp.pages.dev',
-			text: 'Shared from AuntyAcid App',
-			files: [file]
-		});
-	} catch (err) {
-		// Fallback to text-only sharing on error
-		if (err.name === 'SecurityError' || err.message?.includes('failed')) {
-			try {
-				await navigator.share({
-					url: 'https://auntyacidapp.pages.dev',
-					text: `Shared from AuntyAcid App - Comic for ${formattedComicDate || 'today'}`
-				});
-				return;
-			} catch (fallbackErr) {
-				// Silent fail if sharing canceled
-			}
+		const file = await fetchComicFile(pictureUrl, displayedDate);
+		if (file && navigator.canShare?.({ files: [file] })) {
+			await navigator.share({ title, text: title, url: shareUrl, files: [file] });
+		} else {
+			await navigator.share({ title, text: title, url: shareUrl });
 		}
-		
-		// Show error only if not user-canceled
-		if (err.name !== 'AbortError') {
-			showNotification('Failed to share. Please try again.');
+	} catch (err) {
+		if (err.name === 'AbortError') return;
+		// File sharing rejected or user activation expired - try a plain link, then the clipboard
+		try {
+			await navigator.share({ title, text: title, url: shareUrl });
+		} catch (fallbackErr) {
+			if (fallbackErr.name !== 'AbortError') await copyShareLink(shareUrl);
 		}
 	}
 }
 
-// Favorites management
+// ========================================
+// FAVORITES
+// ========================================
+
+function setFavoritesMode(enabled) {
+	const checkbox = $('showfavs');
+	if (checkbox) checkbox.checked = enabled;
+	localStorage.setItem('showfavs', enabled ? 'true' : 'false');
+}
+
+function nearestFavorite(favs, date) {
+	const { previous, next } = Core.favoriteNeighbors(favs, date);
+	return Core.parseYmd(previous || next || favs[0]);
+}
+
 function Addfav() {
-	formattedComicDate = `${year}/${month}/${day}`;
-	let favs = getFavs();
-	const index = favs.indexOf(formattedComicDate);
-	
+	if (!displayedDate) {
+		showNotification('No comic loaded yet.');
+		return;
+	}
+
+	const ymd = Core.toYmd(displayedDate);
+	const favs = getFavs();
+	const index = favs.indexOf(ymd);
+
 	if (index === -1) {
-		favs.push(formattedComicDate);
+		favs.push(ymd);
+		favs.sort();
+		setFavs(favs);
 		updateFavIcon(true);
-		$('showfavs').disabled = false;
 	} else {
 		favs.splice(index, 1);
+		setFavs(favs);
 		updateFavIcon(false);
-		if (favs.length === 0) {
-			$('showfavs').checked = false;
-			$('showfavs').disabled = true;
+
+		if (isFavoritesMode()) {
+			if (favs.length === 0) {
+				setFavoritesMode(false);
+				showNotification('No favorites left - showing all comics.');
+			} else {
+				// The comic on screen is no longer a favorite; move to the closest remaining one
+				const { previous, next } = Core.favoriteNeighbors(favs, displayedDate);
+				showComic(Core.parseYmd(next || previous), 'morph');
+			}
 		}
 	}
-	
-	favs.sort();
-	setFavs(favs);
-	CompareDates();
-	showComic();
+
+	updateExportButtonState();
+	updateNavState();
 }
 
-// Navigation functions
-function PreviousClick() {
+// ========================================
+// NAVIGATION
+// ========================================
+
+// Navigation continues from the most recently requested date so rapid clicks keep advancing.
+function navigationBase() {
+	return selectedDate || displayedDate || todayDate();
+}
+
+function favoritesForNavigation() {
 	const favs = getFavs();
-	if ($('showfavs').checked) {
-		const index = favs.indexOf(formattedComicDate);
-		if (index > 0) {
-			currentselectedDate = new Date(favs[index - 1]);
-		}
-	} else {
-		currentselectedDate.setDate(currentselectedDate.getDate() - 1);
+	return isFavoritesMode() && favs.length ? favs : null;
+}
+
+function PreviousClick() {
+	const base = navigationBase();
+	const favs = favoritesForNavigation();
+	if (favs) {
+		const { previous } = Core.favoriteNeighbors(favs, base);
+		if (previous) showComic(Core.parseYmd(previous), 'previous');
+	} else if (base > START_DATE) {
+		showComic(Core.addDays(base, -1), 'previous');
 	}
-	previousclicked = true;
-	CompareDates();
-	showComic('previous'); // Filmstrip slide animation
 }
 
 function NextClick() {
-	const favs = getFavs();
-	if ($('showfavs').checked) {
-		const index = favs.indexOf(formattedComicDate);
-		if (index < favs.length - 1) {
-			currentselectedDate = new Date(favs[index + 1]);
-		}
-	} else {
-		currentselectedDate.setDate(currentselectedDate.getDate() + 1);
+	const base = navigationBase();
+	const favs = favoritesForNavigation();
+	if (favs) {
+		const { next } = Core.favoriteNeighbors(favs, base);
+		if (next) showComic(Core.parseYmd(next), 'next');
+	} else if (base < todayDate()) {
+		showComic(Core.addDays(base, 1), 'next');
 	}
-	CompareDates();
-	showComic('next'); // Filmstrip slide animation
 }
 
 function FirstClick() {
-	const favs = getFavs();
-	currentselectedDate = $('showfavs').checked 
-		? new Date(favs[0]) 
-		: new Date(Date.UTC(2013, 4, 6, 12));
-	CompareDates();
-	showComic('morph'); // Blur morph animation
+	const favs = favoritesForNavigation();
+	showComic(favs ? Core.parseYmd(favs[0]) : START_DATE, 'morph');
 }
 
 function CurrentClick() {
-	const favs = getFavs();
-	currentselectedDate = $('showfavs').checked 
-		? new Date(favs[favs.length - 1]) 
-		: new Date();
-	CompareDates();
-	showComic('morph'); // Blur morph animation
+	const favs = favoritesForNavigation();
+	if (favs) {
+		showComic(Core.parseYmd(favs[favs.length - 1]), 'morph');
+	} else {
+		showComic(todayDate(), 'morph', { fallbackToPrevious: true });
+	}
+}
+
+function randomTarget() {
+	const favs = favoritesForNavigation();
+	if (favs) {
+		const current = displayedDate ? Core.toYmd(displayedDate) : null;
+		const pool = favs.length > 1 ? favs.filter(fav => fav !== current) : favs;
+		return Core.parseYmd(pool[Math.floor(Math.random() * pool.length)]);
+	}
+	const spanDays = Math.round((todayDate() - START_DATE) / 86400000);
+	return Core.addDays(START_DATE, Math.floor(Math.random() * (spanDays + 1)));
 }
 
 function RandomClick() {
-	const favs = getFavs();
-	if ($('showfavs').checked) {
-		const randomIndex = Math.floor(Math.random() * favs.length);
-		currentselectedDate = new Date(favs[randomIndex]);
-	} else {
-		const start = START_DATE.getTime();
-		const end = Date.now();
-		currentselectedDate = new Date(start + Math.random() * (end - start));
-	}
-	CompareDates();
-	showComic('morph'); // Blur morph animation
+	showComic(randomTarget(), 'morph');
 }
 
 function DateChange() {
-	currentselectedDate = new Date($('DatePicker').value);
-	CompareDates();
-	showComic('morph'); // Blur morph animation
+	const picked = Core.parseYmd($('DatePicker').value);
+	if (picked) showComic(picked, 'morph');
 }
 
-// Display comic with animation
-// direction: 'next', 'previous' for filmstrip slide; 'morph' for blur effect; null for no animation
-function showComic(direction = null) {
-	formatDate(currentselectedDate);
-	formattedDate = `${year}-${month}-${day}`;
-	formattedComicDate = `${year}/${month}/${day}`;
-	$('DatePicker').value = formattedDate;
-	
-	const siteUrl = `${CORS_PROXY}https://www.gocomics.com/aunty-acid/${formattedComicDate}`;
-	localStorage.setItem('lastcomic', currentselectedDate);
-	
-	fetch(siteUrl)
-		.then(response => {
-			if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
-			return response.text();
-		})
-		.then(text => {
-			// Extract comic image URL using the reusable function
-			const imageUrl = extractComicImageUrl(text);
-			
-			if (!imageUrl) {
-				showNotification('Could not load comic for this date');
-				return;
-			}
-			
-			pictureUrl = imageUrl;
-			
-			if (pictureUrl !== previousUrl) {
-				const comicImg = $('comic');
-				const wrapper = $('comic-wrapper');
-				
-				// Animate transition based on direction
-				if (direction && comicImg.src && comicImg.src !== window.location.href) {
-					if (direction === 'next' || direction === 'previous') {
-						// THROW-OUT animation - fling old comic away while new fades in
-						const throwOutClass = direction === 'previous' ? 'throw-out-right' : 'throw-out-left';
-						
-						// Create a clone of current comic to throw out
-						const outgoingClone = comicImg.cloneNode(true);
-						outgoingClone.removeAttribute('id');
-						outgoingClone.classList.add('comic-outgoing');
-						outgoingClone.classList.remove('throw-out-left', 'throw-out-right', 'no-transition', 'fade-in-new', 'visible');
-						wrapper.appendChild(outgoingClone);
-						
-						// Set new image source - start hidden, fade in
-						comicImg.classList.add('fade-in-new');
-						comicImg.src = pictureUrl;
-						
-						// Force reflow
-						outgoingClone.offsetHeight;
-						
-						requestAnimationFrame(() => {
-							requestAnimationFrame(() => {
-								// Throw out the old comic
-								outgoingClone.classList.add(throwOutClass);
-								// Fade in new comic
-								comicImg.classList.add('visible');
-								
-								// Cleanup after animation
-								setTimeout(() => {
-									outgoingClone.remove();
-									comicImg.classList.remove('fade-in-new', 'visible');
-								}, 400);
-							});
-						});
-					} else if (direction === 'morph') {
-						// BLUR MORPH animation - blur out old, fade in new
-						const outgoingClone = comicImg.cloneNode(true);
-						outgoingClone.removeAttribute('id');
-						outgoingClone.classList.add('comic-pixelate-outgoing');
-						wrapper.appendChild(outgoingClone);
-						
-						// Load new image underneath
-						comicImg.src = pictureUrl;
-						
-						// Wait for new image to load, THEN blur out clone
-						const startMorph = () => {
-							// Use requestAnimationFrame to ensure the DOM is ready
-							requestAnimationFrame(() => {
-								outgoingClone.classList.add('morph-out');
-							});
-							
-							// Remove clone after animation completes
-							setTimeout(() => {
-								outgoingClone.remove();
-							}, 600);
-						};
-						
-						if (comicImg.complete) {
-							startMorph();
-						} else {
-							comicImg.addEventListener('load', startMorph, { once: true });
-						}
-					}
-				} else {
-					// First load or no animation - just set source
-					comicImg.src = pictureUrl;
+function openDatePicker() {
+	const picker = $('DatePicker');
+	if (!picker || picker.disabled) return;
+	try {
+		picker.showPicker();
+	} catch {
+		picker.focus();
+		picker.click();
+	}
+}
+
+// Trigger a toolbar action only when its button is enabled (used by swipe and keyboard)
+function triggerNav(buttonId) {
+	const button = $(buttonId);
+	if (button && !button.disabled) button.click();
+}
+
+// ========================================
+// COMIC LOADING & DISPLAY
+// ========================================
+
+function describeLoadError(error, date) {
+	const when = formatLongDate(date);
+	switch (error?.kind) {
+		case 'offline':
+			return "You're offline and this comic isn't saved on this device yet.";
+		case 'http':
+			return `GoComics didn't return the comic for ${when} (error ${error.status}).`;
+		case 'no-image':
+			return `No comic found for ${when}.`;
+		case 'image':
+			return `Couldn't load the comic image for ${when}.`;
+		default:
+			return "Couldn't reach the comic server. Please check your connection.";
+	}
+}
+
+/**
+ * Load and display the comic for a date.
+ * direction: 'next'/'previous' (throw-out), 'morph' (blur) or null (instant).
+ * Only the most recent request may update the screen, so slow responses can't overwrite newer ones.
+ */
+function showComic(date, direction = null, { fallbackToPrevious = false, skips = 0 } = {}) {
+	const target = Core.clampDate(date, START_DATE, todayDate());
+	const ymd = Core.toYmd(target);
+	const sequence = ++loadSequence;
+	const favoritesMode = isFavoritesMode();
+
+	selectedDate = target;
+	updateNavState();
+
+	getComicImageUrl(ymd)
+		.then(url => {
+			if (sequence !== loadSequence) return;
+
+			// A day without its own strip can resolve to the one already on screen; keep stepping.
+			const step = direction === 'next' ? 1 : direction === 'previous' ? -1 : 0;
+			if (url === pictureUrl && step && !favoritesMode && skips < MAX_SAME_IMAGE_SKIPS) {
+				const nextTarget = Core.addDays(target, step);
+				if (nextTarget >= START_DATE && nextTarget <= todayDate()) {
+					showComic(nextTarget, direction, { skips: skips + 1 });
+					return;
 				}
-			} else if (previousclicked) {
-				PreviousClick();
 			}
-			
-			previousclicked = false;
-			previousUrl = pictureUrl;
-			
-			// Update favorite icon based on current comic
-			const favs = getFavs();
-			updateFavIcon(favs.includes(formattedComicDate));
-			
-			// Update navigation button states
-			CompareDates();
-			
-			// Preload adjacent comics for faster navigation
-			preloadAdjacentComics(currentselectedDate);
-			
-			// Ensure toolbar doesn't overlap the newly loaded comic
-			const comicElement = $('comic');
-			if (comicElement.complete) {
-				setTimeout(clampToolbarInView, 50);
-			} else {
-				comicElement.addEventListener('load', () => {
-					setTimeout(clampToolbarInView, 50);
-				}, { once: true });
-			}
+
+			return loadImage(url).then(() => {
+				if (sequence === loadSequence) displayComic(target, url, direction);
+			});
 		})
 		.catch(error => {
-			showNotification('Could not load comic');
+			if (sequence !== loadSequence) return;
+
+			// The image URL may be stale; look the page up again next time (unless simply offline)
+			if (error?.kind === 'image') forgetImageUrl(ymd);
+
+			// Today's strip may not be published yet in the user's timezone
+			if (fallbackToPrevious && Core.sameDay(target, todayDate()) && (error.kind === 'http' || error.kind === 'no-image')) {
+				showComic(Core.addDays(target, -1), direction);
+				return;
+			}
+
+			selectedDate = displayedDate;
+			updateNavState();
+			showNotification(describeLoadError(error, target), 6000, {
+				label: 'Retry',
+				handler: () => showComic(target, direction)
+			});
 		});
 }
 
-// Date comparison and button state management
-function CompareDates() {
-	const favs = getFavs();
-	const showFavsChecked = $('showfavs').checked;
-	let startDate, endDate;
-	
-	$('DatePicker').disabled = showFavsChecked;
-	startDate = showFavsChecked && favs.length ? new Date(favs[0]) : new Date('2013/05/06');
-	
-	startDate.setHours(0, 0, 0, 0);
-	currentselectedDate.setHours(0, 0, 0, 0);
-	currentselectedDate = new Date(currentselectedDate);
-	
-	const isAtStart = currentselectedDate.getTime() <= startDate.getTime();
-	$('Previous').disabled = isAtStart;
-	$('First').disabled = isAtStart;
-	
-	if (isAtStart) {
-		formatDate(startDate);
-		currentselectedDate = new Date(Date.UTC(year, month - 1, day, 12));
+function displayComic(date, url, direction) {
+	const previousPicture = pictureUrl;
+	displayedDate = date;
+	selectedDate = date;
+	pictureUrl = url;
+
+	localStorage.setItem('lastcomic', Core.toYmd(date, '-'));
+
+	// A load-error toast (the only kind with an action) is obsolete once a comic displays
+	if ($('notificationAction') && !$('notificationAction').hidden) hideNotification();
+
+	const comicImg = $('comic');
+	comicImg.alt = `Aunty Acid comic for ${formatLongDate(date)}`;
+	if (url !== previousPicture) {
+		renderComicImage(comicImg, url, previousPicture ? direction : null);
 	}
-	
-	endDate = showFavsChecked && favs.length ? new Date(favs[favs.length - 1]) : new Date();
-	endDate.setHours(0, 0, 0, 0);
-	
-	const isAtEnd = currentselectedDate.getTime() >= endDate.getTime();
-	$('Next').disabled = isAtEnd;
-	$('Current').disabled = isAtEnd;
-	
-	if (isAtEnd) {
-		formatDate(endDate);
-		currentselectedDate = new Date(Date.UTC(year, month - 1, day, 12));
-	}
-	
-	if (showFavsChecked && favs.length === 1) {
-		$('Random').disabled = true;
-		$('Previous').disabled = true;
-		$('First').disabled = true;
+
+	updateFavIcon(getFavs().includes(Core.toYmd(date)));
+	updateNavState();
+	preloadAdjacentComics(date);
+
+	// Ensure toolbar doesn't overlap the newly loaded comic
+	if (comicImg.complete) {
+		setTimeout(clampToolbarInView, 50);
 	} else {
-		$('Random').disabled = false;
+		comicImg.addEventListener('load', () => setTimeout(clampToolbarInView, 50), { once: true });
 	}
 }
 
-// URL Parameter handling
-function handleUrlParams() {
-	const params = new URLSearchParams(window.location.search);
-	
-	if (params.get('action') === 'random') {
-		RandomClick();
+function renderComicImage(comicImg, url, direction) {
+	const wrapper = $('comic-wrapper');
+	if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+		direction = null;
 	}
-	
-	if (params.get('view') === 'favorites') {
-		const favs = getFavs();
-		if (favs.length > 0) {
-			$('showfavs').checked = true;
-			localStorage.setItem('showfavs', 'true');
+
+	if (direction === 'next' || direction === 'previous') {
+		// THROW-OUT animation - fling old comic away while new fades in
+		const throwOutClass = direction === 'previous' ? 'throw-out-right' : 'throw-out-left';
+
+		const outgoingClone = comicImg.cloneNode(true);
+		outgoingClone.removeAttribute('id');
+		outgoingClone.setAttribute('aria-hidden', 'true');
+		outgoingClone.classList.add('comic-outgoing');
+		outgoingClone.classList.remove('throw-out-left', 'throw-out-right', 'no-transition', 'fade-in-new', 'visible');
+		wrapper.appendChild(outgoingClone);
+
+		comicImg.classList.add('fade-in-new');
+		applyImageSource(comicImg, url);
+
+		// Force reflow
+		outgoingClone.offsetHeight;
+
+		requestAnimationFrame(() => {
+			requestAnimationFrame(() => {
+				outgoingClone.classList.add(throwOutClass);
+				comicImg.classList.add('visible');
+				setTimeout(() => {
+					outgoingClone.remove();
+					comicImg.classList.remove('fade-in-new', 'visible');
+				}, 400);
+			});
+		});
+	} else if (direction === 'morph') {
+		// BLUR MORPH animation - blur out old, reveal new underneath
+		const outgoingClone = comicImg.cloneNode(true);
+		outgoingClone.removeAttribute('id');
+		outgoingClone.setAttribute('aria-hidden', 'true');
+		outgoingClone.classList.add('comic-pixelate-outgoing');
+		wrapper.appendChild(outgoingClone);
+
+		applyImageSource(comicImg, url);
+
+		const startMorph = () => {
+			requestAnimationFrame(() => outgoingClone.classList.add('morph-out'));
+			setTimeout(() => outgoingClone.remove(), 600);
+		};
+
+		if (comicImg.complete) {
+			startMorph();
+		} else {
+			comicImg.addEventListener('load', startMorph, { once: true });
+			comicImg.addEventListener('error', startMorph, { once: true });
 		}
+	} else {
+		applyImageSource(comicImg, url);
 	}
 }
 
-// Initialize App
-function initApp() {
-	previousclicked = false;
-	previousUrl = '';
-	
+// Button, date picker and checkbox state for the current navigation position
+function updateNavState() {
 	const favs = getFavs();
-	const showFavsChecked = $('showfavs').checked;
-	
-	if (favs.length === 0) {
-		$('showfavs').checked = false;
-		$('showfavs').disabled = true;
-		currentselectedDate = $('DatePicker').valueAsDate = new Date();
-	} else if (showFavsChecked) {
-		currentselectedDate = new Date(favs[0]);
+	const favoritesMode = isFavoritesMode() && favs.length > 0;
+	const base = navigationBase();
+	const baseKey = Core.toYmd(base);
+	const today = todayDate();
+
+	const picker = $('DatePicker');
+	if (picker) {
+		picker.min = Core.toYmd(START_DATE, '-');
+		picker.max = Core.toYmd(today, '-');
+		picker.value = Core.toYmd(base, '-');
+		picker.disabled = favoritesMode;
+	}
+	const pickerButton = $('DatePickerBtn');
+	if (pickerButton) pickerButton.disabled = favoritesMode;
+
+	let noPrevious, noNext, atFirst, atLast;
+	if (favoritesMode) {
+		const { previous, next } = Core.favoriteNeighbors(favs, base);
+		noPrevious = !previous;
+		noNext = !next;
+		atFirst = baseKey === favs[0];
+		atLast = baseKey === favs[favs.length - 1];
 	} else {
-		currentselectedDate = $('DatePicker').valueAsDate = new Date();
-		$('Next').disabled = true;
-		$('Current').disabled = true;
+		noPrevious = atFirst = base <= START_DATE;
+		noNext = atLast = base >= today;
 	}
-	
-	formatDate(new Date());
-	$('DatePicker').setAttribute('max', `${year}-${month}-${day}`);
-	
-	if ($('lastdate').checked && localStorage.getItem('lastcomic')) {
-		currentselectedDate = new Date(localStorage.getItem('lastcomic'));
+
+	$('Previous').disabled = noPrevious;
+	$('First').disabled = atFirst;
+	$('Next').disabled = noNext;
+	$('Current').disabled = atLast;
+	$('Random').disabled = favoritesMode && favs.length === 1 && atFirst;
+
+	const showfavs = $('showfavs');
+	if (showfavs) {
+		showfavs.disabled = favs.length === 0;
+		if (favs.length === 0) showfavs.checked = false;
 	}
-	
-	// Handle URL parameters
-	handleUrlParams();
-	
-	CompareDates();
-	showComic();
+}
+
+// ========================================
+// INITIALIZATION
+// ========================================
+
+function initialComicDate(favs) {
+	const params = new URLSearchParams(window.location.search);
+	const showfavs = $('showfavs');
+
+	showfavs.checked = localStorage.getItem('showfavs') === 'true' && favs.length > 0;
+	if (params.get('view') === 'favorites' && favs.length > 0) {
+		setFavoritesMode(true);
+	}
+
+	// Shared links (?date=YYYY-MM-DD) always open the shared comic
+	const linked = Core.parseYmd(params.get('date') || '');
+	if (linked && linked >= START_DATE && linked <= todayDate()) {
+		showfavs.checked = false;
+		params.delete('date');
+		const query = params.toString();
+		history.replaceState(null, '', window.location.pathname + (query ? `?${query}` : '') + window.location.hash);
+		return linked;
+	}
+
+	if (params.get('action') === 'random') {
+		return randomTarget();
+	}
+
+	let start = null;
+	if ($('lastdate').checked) {
+		const stored = Core.parseStoredDate(localStorage.getItem('lastcomic'));
+		if (stored && stored >= START_DATE && stored <= todayDate()) start = stored;
+	}
+
+	if (showfavs.checked) {
+		if (!start) return Core.parseYmd(favs[0]);
+		if (!favs.includes(Core.toYmd(start))) return nearestFavorite(favs, start);
+	}
+
+	return start;
+}
+
+function initApp() {
+	const favs = getFavs();
+	const start = initialComicDate(favs) || todayDate();
+	showComic(start, null, { fallbackToPrevious: Core.sameDay(start, todayDate()) });
 	updateExportButtonState();
 }
 
 // Native Swipe Detection
+const SWIPE_IGNORE_SELECTOR = '#mainToolbar, .settings-panel, .notification-toast, #installBtn, button, input';
+
 const swipeDetection = {
 	startX: 0,
 	startY: 0,
@@ -1030,63 +1157,71 @@ const swipeDetection = {
 	restraint: 100, // Maximum perpendicular distance
 	allowedTime: 500, // Maximum time for swipe
 	startTime: 0,
-	
+	tracking: false,
+
 	init() {
 		const target = document.body;
-		
+
 		target.addEventListener('touchstart', (e) => {
+			// Ignore multi-touch (pinch zoom) and gestures on controls such as the draggable toolbar
+			if (e.touches.length > 1 || e.target.closest(SWIPE_IGNORE_SELECTOR)) {
+				this.tracking = false;
+				return;
+			}
 			const touch = e.changedTouches[0];
+			this.tracking = true;
 			this.startX = touch.pageX;
 			this.startY = touch.pageY;
 			this.startTime = Date.now();
 		}, { passive: true });
-		
+
 		target.addEventListener('touchend', (e) => {
-			if (!$('swipe')?.checked) return;
-			
+			if (!this.tracking) return;
+			this.tracking = false;
+			if (!$('swipe')?.checked || $('settingsDIV')?.classList.contains('visible')) return;
+
 			const touch = e.changedTouches[0];
 			const distX = touch.pageX - this.startX;
 			const distY = touch.pageY - this.startY;
 			const elapsedTime = Date.now() - this.startTime;
-			
+
 			if (elapsedTime > this.allowedTime) return;
-			
-			// Horizontal swipe
+
 			if (Math.abs(distX) >= this.threshold && Math.abs(distY) <= this.restraint) {
-				if (distX > 0) {
-					PreviousClick(); // Swipe right
-				} else {
-					NextClick(); // Swipe left
-				}
-			}
-			// Vertical swipe
-			else if (Math.abs(distY) >= this.threshold && Math.abs(distX) <= this.restraint) {
-				if (distY > 0) {
-					RandomClick(); // Swipe down
-				} else {
-					CurrentClick(); // Swipe up
-				}
+				triggerNav(distX > 0 ? 'Previous' : 'Next');
+			} else if (Math.abs(distY) >= this.threshold && Math.abs(distX) <= this.restraint) {
+				triggerNav(distY > 0 ? 'Random' : 'Current');
 			}
 		}, { passive: true });
 	}
 };
 
-// Initialize swipe detection
 swipeDetection.init();
+
+// Keyboard shortcuts: Left/Right previous/next, Home/End first/latest, Esc closes settings
+document.addEventListener('keydown', (e) => {
+	const settingsOpen = $('settingsDIV')?.classList.contains('visible');
+	if (e.key === 'Escape') {
+		if (settingsOpen) hideSettings({ restoreFocus: true });
+		return;
+	}
+	if (settingsOpen || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+	if (e.target.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+
+	const actions = { ArrowLeft: 'Previous', ArrowRight: 'Next', Home: 'First', End: 'Current' };
+	const buttonId = actions[e.key];
+	if (!buttonId) return;
+	e.preventDefault();
+	triggerNav(buttonId);
+});
 
 // Event Listeners - DOM Content Loaded
 document.addEventListener('DOMContentLoaded', () => {
-	// Initialize checkbox states from localStorage FIRST
 	const swipeCheckbox = $('swipe');
 	const lastdateCheckbox = $('lastdate');
-	const showfavsCheckbox = $('showfavs');
-	
 	if (swipeCheckbox) swipeCheckbox.checked = localStorage.getItem('stat') !== 'false';
 	if (lastdateCheckbox) lastdateCheckbox.checked = localStorage.getItem('lastdate') !== 'false';
-	
-	const showFavsStatus = localStorage.getItem('showfavs') === 'true';
-	if (showfavsCheckbox) showfavsCheckbox.checked = showFavsStatus;
-	
+
 	// Navigation buttons
 	$('First')?.addEventListener('click', FirstClick);
 	$('Previous')?.addEventListener('click', PreviousClick);
@@ -1094,61 +1229,53 @@ document.addEventListener('DOMContentLoaded', () => {
 	$('DatePicker')?.addEventListener('change', DateChange);
 	$('Next')?.addEventListener('click', NextClick);
 	$('Current')?.addEventListener('click', CurrentClick);
-	
-	// Date picker button - opens the hidden date picker
-	$('DatePickerBtn')?.addEventListener('click', () => {
-		const datePicker = $('DatePicker');
-		if (datePicker) {
-			datePicker.showPicker?.() || datePicker.click();
-		}
-	});
-	
-	// Initialize toolbar
+	$('DatePickerBtn')?.addEventListener('click', openDatePicker);
+
 	initializeToolbar();
-	
+
 	// Icon buttons
 	$('settingsBtn')?.addEventListener('click', toggleSettings);
 	$('favheart')?.addEventListener('click', Addfav);
 	$('shareBtn')?.addEventListener('click', Share);
-	
+
 	// Settings panel
-	$('settingsCloseBtn')?.addEventListener('click', hideSettings);
+	$('settingsCloseBtn')?.addEventListener('click', () => hideSettings({ restoreFocus: true }));
 	$('exportFavs')?.addEventListener('click', exportFavorites);
 	$('importFavs')?.addEventListener('click', importFavorites);
 	$('importFile')?.addEventListener('change', handleImportFile);
-	
-	// Notification close
-	document.querySelector('.notification-close')?.addEventListener('click', hideNotification);
-	
-	// Install button
+
+	$('notificationClose')?.addEventListener('click', hideNotification);
 	$('installBtn')?.addEventListener('click', handleInstall);
-	
+
 	// Checkbox handlers
 	$('swipe')?.addEventListener('change', function() {
 		localStorage.setItem('stat', this.checked ? 'true' : 'false');
 	});
-	
+
 	$('lastdate')?.addEventListener('change', function() {
 		localStorage.setItem('lastdate', this.checked ? 'true' : 'false');
 	});
-	
+
 	$('showfavs')?.addEventListener('change', function() {
-		localStorage.setItem('showfavs', this.checked ? 'true' : 'false');
-		CompareDates();
-		showComic();
+		setFavoritesMode(this.checked);
+		const favs = getFavs();
+		const base = navigationBase();
+		if (this.checked && favs.length && !favs.includes(Core.toYmd(base))) {
+			showComic(nearestFavorite(favs, base), 'morph');
+		} else {
+			updateNavState();
+		}
 	});
-	
+
 	// Close settings panel when clicking outside
 	document.addEventListener('click', (e) => {
-		const panel = document.querySelector('.settings-panel');
-		const settingsBtn = $('settingsBtn');
-		if (panel?.classList.contains('visible') && 
-			!panel.contains(e.target) && 
-			!settingsBtn?.contains(e.target)) {
+		const panel = $('settingsDIV');
+		if (panel?.classList.contains('visible') &&
+			!panel.contains(e.target) &&
+			!$('settingsBtn')?.contains(e.target)) {
 			hideSettings();
 		}
 	});
-	
-	// Initialize app
+
 	initApp();
 });
