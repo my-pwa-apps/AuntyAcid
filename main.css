@@ -9,6 +9,29 @@
 	--shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.3);
 	--transition-fast: 0.15s ease;
 	--transition-normal: 0.3s ease;
+	/* Touch is the default assumption: no focus ring. Fine-pointer devices get a real one below;
+	   touch browsers match :focus-visible after programmatic focus moves (e.g. closing settings
+	   returns focus to its button), which painted rings nobody asked for. */
+	--focus-ring: none;
+	--focus-outline: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+	:root {
+		--focus-ring: 0 0 0 3px rgba(155, 89, 182, 0.4);
+		--focus-outline: 3px solid purple;
+	}
+}
+
+/* Android and iOS paint a highlight rectangle on touch-down, before any focus or active state
+   applies, so this belongs on the base interactive elements rather than in :focus rules. */
+button,
+a,
+input,
+select,
+label,
+[tabindex] {
+	-webkit-tap-highlight-color: transparent;
 }
 
 html {
@@ -204,7 +227,7 @@ input[type="date"] {
 
 .toolbar-button:focus-visible {
 	outline: none;
-	box-shadow: 0 0 0 3px rgba(155, 89, 182, 0.4);
+	box-shadow: var(--focus-ring);
 	transform: translateY(-2px) scale(1.03);
 }
 
@@ -324,6 +347,11 @@ input[type="date"] {
 
 #comic.no-transition {
 	transition: none !important;
+}
+
+/* Keep the reserved space but hide the empty-image placeholder until the first comic arrives */
+#comic:not([src]) {
+	visibility: hidden;
 }
 
 /* Outgoing comic clone for throw-out effect */
@@ -715,9 +743,144 @@ input[type="date"] {
 .settings-close:focus-visible,
 .backup-button:focus-visible,
 .notification-close:focus-visible,
-.notification-action:focus-visible {
-	outline: 3px solid purple;
+.notification-action:focus-visible,
+.setting-item input:focus-visible,
+.update-banner-button:focus-visible {
+	outline: var(--focus-outline);
 	outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+	a:focus-visible,
+	input:focus-visible,
+	button:focus-visible,
+	[tabindex]:focus-visible {
+		outline: 3px solid Highlight;
+		outline-offset: 2px;
+	}
+}
+
+/* Offline status pill */
+.offline-indicator {
+	position: fixed;
+	top: max(8px, env(safe-area-inset-top));
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 1200;
+	padding: 6px 12px;
+	border-radius: 999px;
+	background: rgba(128, 0, 128, 0.92);
+	color: #fff;
+	font-size: 0.8rem;
+	font-weight: 700;
+	box-shadow: var(--shadow-md);
+	pointer-events: none;
+}
+
+.offline-indicator[hidden] {
+	display: none;
+}
+
+/* "New version available" banner */
+.update-banner {
+	position: fixed;
+	right: 16px;
+	bottom: calc(40px + env(safe-area-inset-bottom, 0px));
+	z-index: 10002;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	max-width: min(380px, calc(100vw - 32px));
+	padding: 12px 14px;
+	color: #fff;
+	background: linear-gradient(135deg, rgba(155, 89, 182, 0.97) 0%, rgba(142, 68, 173, 0.97) 100%);
+	border: 1px solid rgba(255, 255, 255, 0.25);
+	border-radius: 12px;
+	box-shadow: var(--shadow-lg);
+	text-align: left;
+}
+
+.update-banner p {
+	margin: 0;
+	font-size: 0.9rem;
+	font-weight: 600;
+	line-height: 1.3;
+}
+
+.update-banner-button {
+	flex-shrink: 0;
+	padding: 8px 14px;
+	border: 1px solid purple;
+	border-radius: 8px;
+	background: var(--primary-gradient);
+	color: purple;
+	font-weight: 700;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.update-banner-button:disabled {
+	opacity: 0.6;
+	cursor: progress;
+}
+
+/* Double-tap favorite burst over the comic */
+#comic-wrapper {
+	touch-action: manipulation;
+}
+
+.fav-burst {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	width: min(35%, 180px);
+	height: auto;
+	z-index: 3;
+	pointer-events: none;
+	transform: translate(-50%, -50%) scale(0);
+	filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.35));
+	animation: favBurst 0.8s ease-out forwards;
+}
+
+.fav-burst path {
+	stroke-width: 1.5;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.fav-burst-added path {
+	fill: #e74c3c;
+	stroke: #fff;
+}
+
+.fav-burst-removed path {
+	fill: rgba(255, 255, 255, 0.35);
+	stroke: #fff;
+}
+
+@keyframes favBurst {
+	0% { transform: translate(-50%, -50%) scale(0); opacity: 0; }
+	25% { transform: translate(-50%, -50%) scale(1.15); opacity: 1; }
+	45% { transform: translate(-50%, -50%) scale(0.95); opacity: 1; }
+	100% { transform: translate(-50%, -50%) scale(1.05); opacity: 0; }
+}
+
+/* Settings footer */
+.settings-hint {
+	margin: 12px 0 0;
+	font-size: 0.8rem;
+	line-height: 1.4;
+	opacity: 0.8;
+}
+
+.settings-version {
+	margin: 8px 0 0;
+	font-size: 0.7rem;
+	opacity: 0.6;
+}
+
+.settings-version:empty {
+	display: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

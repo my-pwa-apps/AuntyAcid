@@ -1,4 +1,5 @@
-const CACHE_NAME = 'auntyacid-v29';
+const CACHE_NAME = 'auntyacid-v30';
+const VERSION = CACHE_NAME.replace('auntyacid-', '');
 // Comic images are kept across app versions so previously viewed comics work offline.
 const IMAGE_CACHE_NAME = 'auntyacid-images-v1';
 const IMAGE_CACHE_LIMIT = 150;
@@ -18,12 +19,13 @@ const PRECACHE_ASSETS = [
   './manifest-icon-512.maskable.png'
 ];
 
-// Install event - cache core assets
+// Install event - cache core assets. skipWaiting() is deliberately NOT called here: the new
+// worker waits until the user accepts the in-app update banner (SKIP_WAITING message) instead of
+// taking over (and deleting the old cache under) a page that is still open.
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(PRECACHE_ASSETS))
-      .then(() => self.skipWaiting())
+      .then(cache => cache.addAll(PRECACHE_ASSETS.map(asset => new Request(asset, { cache: 'reload' }))))
   );
 });
 
@@ -147,7 +149,10 @@ self.addEventListener('fetch', (event) => {
 
 // Handle messages from clients
 self.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'SKIP_WAITING') {
+  const type = event.data && event.data.type;
+  if (type === 'SKIP_WAITING') {
     self.skipWaiting();
+  } else if (type === 'GET_VERSION' && event.ports && event.ports[0]) {
+    event.ports[0].postMessage({ type: 'VERSION', version: VERSION });
   }
 });

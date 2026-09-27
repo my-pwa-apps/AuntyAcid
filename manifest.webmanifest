@@ -103,14 +103,14 @@
   "screenshots": [
     {
       "src": "./screenshots/screenshot1.png",
-      "sizes": "1280x720",
+      "sizes": "726x1300",
       "type": "image/png",
-      "form_factor": "wide",
-      "label": "Aunty Acid Comics on Desktop"
+      "form_factor": "narrow",
+      "label": "Aunty Acid comic with date navigation, favorites and sharing controls"
     },
     {
       "src": "./screenshots/screenshot2.png",
-      "sizes": "390x844",
+      "sizes": "735x1303",
       "type": "image/png",
       "form_factor": "narrow",
       "label": "Aunty Acid Comics on Mobile"

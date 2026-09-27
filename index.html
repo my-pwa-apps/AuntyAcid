@@ -3,12 +3,12 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self'; img-src 'self' https://featureassets.gocomics.com https://assets.amuniversal.com data: blob:; connect-src 'self' https://corsproxy.garfieldapp.workers.dev https://featureassets.gocomics.com https://assets.amuniversal.com https://cloudflareinsights.com; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
 	
 	<!-- Primary Meta Tags -->
 	<title>Aunty Acid Comics - Daily Comic Strips | Free PWA Reader</title>
 	<meta name="title" content="Aunty Acid Comics - Daily Comic Strips | Free PWA Reader">
 	<meta name="description" content="Read Aunty Acid comic strips daily! Browse 10+ years of Ged Backland's hilarious comics. Save favorites, swipe navigation, works offline. Free progressive web app for iOS, Android & desktop.">
-	<meta name="keywords" content="Aunty Acid, comics, comic strips, Ged Backland, GoComics, daily comics, funny comics, humor, cartoon, PWA, progressive web app, comic reader, offline comics">
 	<meta name="author" content="AuntyAcidApp">
 	<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
 	<meta name="googlebot" content="index, follow">
@@ -34,23 +34,23 @@
 	<meta property="og:title" content="Aunty Acid Comics - Daily Comic Strips">
 	<meta property="og:description" content="Read Aunty Acid comic strips daily! Browse 10+ years of Ged Backland's hilarious comics. Save favorites, swipe navigation, works offline.">
 	<meta property="og:image" content="https://auntyacidapp.pages.dev/android/android-launchericon-512-512.png">
+	<meta property="og:image:type" content="image/png">
 	<meta property="og:image:alt" content="Aunty Acid Comics App Logo">
 	<meta property="og:image:width" content="512">
 	<meta property="og:image:height" content="512">
 	<meta property="og:locale" content="en_US">
 	
-	<!-- Twitter -->
-	<meta name="twitter:card" content="summary_large_image">
+	<!-- Twitter (square app icon, so the compact card) -->
+	<meta name="twitter:card" content="summary">
 	<meta name="twitter:url" content="https://auntyacidapp.pages.dev/">
 	<meta name="twitter:title" content="Aunty Acid Comics - Daily Comic Strips">
 	<meta name="twitter:description" content="Read Aunty Acid comic strips daily! Browse 10+ years of hilarious comics. Free PWA for all devices.">
 	<meta name="twitter:image" content="https://auntyacidapp.pages.dev/android/android-launchericon-512-512.png">
 	<meta name="twitter:image:alt" content="Aunty Acid Comics App">
 	
-	<!-- Preconnect to external origins -->
-	<link rel="preconnect" href="https://assets.amuniversal.com" crossorigin>
+	<!-- Preconnect to external origins (the CORS proxy is on the critical path of every comic) -->
+	<link rel="preconnect" href="https://corsproxy.garfieldapp.workers.dev" crossorigin>
 	<link rel="preconnect" href="https://featureassets.gocomics.com" crossorigin>
-	<link rel="dns-prefetch" href="https://www.gocomics.com">
 	
 	<!-- Icons and manifest -->
 	<link rel="apple-touch-icon" sizes="180x180" href="./ios/180.png">
@@ -75,13 +75,28 @@
 	{
 		"@context": "https://schema.org",
 		"@type": "WebApplication",
+		"@id": "https://auntyacidapp.pages.dev/#app",
 		"name": "Aunty Acid Comics",
 		"alternateName": "Aunty Acid PWA",
 		"url": "https://auntyacidapp.pages.dev/",
 		"description": "Browse daily Aunty Acid comic strips. Navigate through years of comics, save your favorites, and enjoy Ged Backland's hilarious character!",
-		"applicationCategory": "Entertainment",
+		"applicationCategory": "EntertainmentApplication",
 		"operatingSystem": "Any",
 		"browserRequirements": "Requires JavaScript",
+		"isAccessibleForFree": true,
+		"mainEntityOfPage": {
+			"@type": "WebPage",
+			"@id": "https://auntyacidapp.pages.dev/#webpage",
+			"url": "https://auntyacidapp.pages.dev/",
+			"name": "Aunty Acid Comics - Daily Comic Strips",
+			"inLanguage": "en",
+			"isPartOf": {
+				"@type": "WebSite",
+				"@id": "https://auntyacidapp.pages.dev/#website",
+				"url": "https://auntyacidapp.pages.dev/",
+				"name": "Aunty Acid Comics App"
+			}
+		},
 		"offers": {
 			"@type": "Offer",
 			"price": "0",
@@ -101,11 +116,15 @@
 			"url": "https://www.gocomics.com"
 		},
 		"image": "https://auntyacidapp.pages.dev/android/android-launchericon-512-512.png",
-		"screenshot": "https://auntyacidapp.pages.dev/android/android-launchericon-512-512.png",
+		"screenshot": [
+			"https://auntyacidapp.pages.dev/screenshots/screenshot1.png",
+			"https://auntyacidapp.pages.dev/screenshots/screenshot2.png"
+		],
 		"featureList": [
 			"Daily comic strips",
 			"Offline reading",
 			"Favorites system",
+			"Double-tap to favorite",
 			"Swipe navigation",
 			"Date picker navigation",
 			"Share functionality",
@@ -122,8 +141,10 @@
 	
 	<!-- Logo -->
 	<header class="app-header">
-		<img src="./aunytacidlogo.png" alt="Aunty Acid - Hilarious Daily Comics by Ged Backland" class="app-logo">
+		<img src="./aunytacidlogo.png" alt="Aunty Acid - Hilarious Daily Comics by Ged Backland" class="app-logo" width="226" height="70">
 	</header>
+	
+	<div id="offlineIndicator" class="offline-indicator" role="status" hidden>Offline: showing saved comics</div>
 	
 	<!-- Notification Toast -->
 	<div class="notification-toast" id="notificationToast">
@@ -190,7 +211,7 @@
 	<main role="main">
 		<article id="comic-container" itemscope itemtype="https://schema.org/ComicIssue">
 			<div id="comic-wrapper">
-				<img id="comic" alt="Aunty Acid daily comic strip" decoding="async" itemprop="image">
+				<img id="comic" alt="Aunty Acid daily comic strip" width="900" height="980" decoding="async" fetchpriority="high" itemprop="image">
 			</div>
 		</article>
 	</main>
@@ -224,7 +245,7 @@
 	<button id="installBtn" class="button">Install App</button>
 	
 	<!-- Modern Floating Settings Panel -->
-	<div id="settingsDIV" class="settings-panel" role="dialog" aria-labelledby="settingsTitle">
+	<div id="settingsDIV" class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
 		<div class="settings-header" id="settingsHeader">
 			<h3 id="settingsTitle">Settings</h3>
 			<button class="settings-close" id="settingsCloseBtn" aria-label="Close settings">&times;</button>
@@ -262,6 +283,8 @@
 				</button>
 				<input type="file" id="importFile" accept=".json" class="hidden-file-input" aria-label="Import favorites file">
 			</div>
+			<p class="settings-hint">Tip: double-tap (or double-click) a comic to add it to your favorites.</p>
+			<p class="settings-version" id="appVersion"></p>
 		</div>
 	</div>
 	

@@ -1,5 +1,25 @@
 # Aunty Acid PWA — Engineering Backlog
 
+## Ported from GarfieldApp 2026-09-27
+
+Features and fixes from [GarfieldApp](https://github.com/my-pwa-apps/GarfieldApp) (July–September 2026) that apply to this app. Garfield-only work (Google Drive sync, Top 10 leaderboard, Spanish, vertical/rotated strips, source fallbacks, Workers) was not ported.
+
+- [x] **Tap-highlight square on icon buttons (Android/iOS)** — `-webkit-tap-highlight-color` moved to the base interactive elements (GarfieldApp v1.0.9).
+- [x] **Focus rings painting on touch devices** — ring only defined for `(hover: hover) and (pointer: fine)`; forced-colors outline kept (v1.0.8).
+- [x] **Settings dialog accessibility** — `aria-modal`, Tab/Shift+Tab focus trap, focus returns to the opener.
+- [x] **Service worker update model** — no `skipWaiting()` on install; "new version available" banner sends `SKIP_WAITING`; version shown in Settings via `GET_VERSION`; precache bypasses the HTTP cache.
+- [x] **Bounded comic loading** — page lookups and image loads time out (12 s) with a Retry; failed loads retry automatically when the browser comes back online; offline indicator.
+- [x] **Adjacent-only slide transition** — only neighbouring days throw out left/right, longer jumps morph; morph commits styles before transitioning so the blur always animates.
+- [x] **Layout stability** — reserved comic/logo dimensions, decoded size written to the `<img>`, `fetchpriority="high"`, proxy preconnect.
+- [x] **Sharing** — link travels in `text` when a file is attached (WhatsApp/Messages dropped the image), non-JPEG/PNG re-encoded on white for share previews, clipboard fallback copies image + link.
+- [x] **Double-tap / double-click to favorite** with a heart burst over the comic.
+- [x] **`og:image` extraction hardening** — any meta tag order, `property=` or `name=`, `&amp;` decoding.
+- [x] **Search/social metadata** — removed `keywords`, `twitter:card` `summary` for the square icon, `og:image:type`, JSON-LD `EntertainmentApplication` / `@id` / `mainEntityOfPage`, real screenshots.
+- [x] **Content-Security-Policy** meta tag.
+- [x] **Manifest screenshots declared with wrong sizes/form factor** (1280x720 "wide" vs. actual 726x1300 portrait) — fixed, and `tests/assets.test.js` now guards precache/manifest/index references and PNG sizes.
+- [ ] **Wide (desktop) install screenshot** — Chrome's richer desktop install dialog needs a `form_factor: "wide"` screenshot; none exists yet.
+- [ ] **IndexNow** — GarfieldApp pings IndexNow after production deploys; would need a key file and a workflow here.
+
 ## Review 2026-09-24
 
 Scope: full repository review (`app.js`, `index.html`, `main.css`, `sw.js`, `manifest.webmanifest`, static config, assets) plus runtime checks against a local server and the live CORS proxy / GoComics pages.

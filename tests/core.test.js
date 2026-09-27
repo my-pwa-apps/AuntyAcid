@@ -40,6 +40,29 @@ test('extractComicImageUrl returns null when no comic is present', () => {
 	assert.equal(Core.extractComicImageUrl(undefined), null);
 });
 
+test('extractComicImageUrl accepts name="og:image", single quotes and escaped ampersands', () => {
+	assert.equal(Core.extractComicImageUrl(`<meta name='og:image' content='${STRIP}'>${SITE_ASSET}`), STRIP);
+	const escaped = `<meta property="og:image" content="${STRIP}?optimizer=image&amp;width=1400">`;
+	assert.equal(Core.extractComicImageUrl(escaped), `${STRIP}?optimizer=image&width=1400`);
+});
+
+test('extractComicImageUrl skips a foreign og:image and uses a later valid one', () => {
+	const html = `<meta property="og:image" content="https://example.com/x.png"><meta property="og:image" content="${STRIP}">${SITE_ASSET}`;
+	assert.equal(Core.extractComicImageUrl(html), STRIP);
+});
+
+test('adjacentDirection only reports neighbouring calendar days', () => {
+	const day = Core.parseYmd('2024-03-31');
+	assert.equal(Core.adjacentDirection(day, Core.parseYmd('2024-04-01')), 'next');
+	assert.equal(Core.adjacentDirection(day, Core.parseYmd('2024-03-30')), 'previous');
+	assert.equal(Core.adjacentDirection(day, Core.parseYmd('2024-04-02')), null);
+	assert.equal(Core.adjacentDirection(day, day), null);
+	assert.equal(Core.adjacentDirection(null, day), null);
+	// Across DST changes in either hemisphere
+	assert.equal(Core.adjacentDirection(Core.parseYmd('2024-03-09'), Core.parseYmd('2024-03-10')), 'next');
+	assert.equal(Core.adjacentDirection(Core.parseYmd('2024-04-07'), Core.parseYmd('2024-04-06')), 'previous');
+});
+
 test('parseYmd returns the same local calendar day for both separators', () => {
 	for (const input of ['2024-03-15', '2024/03/15']) {
 		const date = Core.parseYmd(input);

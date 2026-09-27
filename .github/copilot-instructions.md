@@ -7,19 +7,19 @@ A Progressive Web App for browsing Aunty Acid comic strips from GoComics. Deploy
 
 ### Core Files (in repository root)
 - `index.html` - Single-page app with toolbar, settings panel, notification toast
-- `core.js` - Pure, DOM-free helpers (exposed as `window.AuntyAcidCore` / CommonJS for tests): `extractComicImageUrl`, local-date helpers (`parseYmd`, `toYmd`, `addDays`, `clampDate`), `sanitizeFavorites`, `safeJsonParse`, `favoriteNeighbors`
-- `app.js` - Application logic: navigation, loading, favorites, sharing, swipe/keyboard, draggable toolbar
+- `core.js` - Pure, DOM-free helpers (exposed as `window.AuntyAcidCore` / CommonJS for tests): `extractComicImageUrl`, local-date helpers (`parseYmd`, `toYmd`, `addDays`, `clampDate`, `adjacentDirection`), `sanitizeFavorites`, `safeJsonParse`, `favoriteNeighbors`
+- `app.js` - Application logic: navigation, loading, favorites (incl. double-tap), sharing, swipe/keyboard, draggable toolbar, SW update banner, offline indicator
 - `main.css` - Pink/purple themed styles with CSS custom properties
-- `sw.js` - Service worker: stale-while-revalidate app shell + navigation fallback + bounded cache of comic images (`auntyacid-images-v1`)
+- `sw.js` - Service worker: stale-while-revalidate app shell + navigation fallback + bounded cache of comic images (`auntyacid-images-v1`); waits for the user to accept updates (`SKIP_WAITING`), answers `GET_VERSION`
 - `manifest.webmanifest` - PWA manifest (uses relative paths `./` for cross-platform compatibility)
-- `tests/` - `node:test` unit tests for `core.js` (`npm test`); CI runs them in several timezones
+- `tests/` - `node:test` unit tests for `core.js` plus asset/manifest checks (`npm test`); CI runs them in several timezones
 
 ### Comic Data Flow
 1. User navigates (buttons/swipe/keyboard/date picker) -> `showComic(date, direction)`
-2. `getComicImageUrl(ymd)` returns a cached URL or fetches the GoComics page via the CORS proxy (in-flight requests are deduplicated)
+2. `getComicImageUrl(ymd)` returns a cached URL or fetches the GoComics page via the CORS proxy (in-flight requests are deduplicated; bounded by `PAGE_LOOKUP_TIMEOUT_MS`)
 3. `Core.extractComicImageUrl()` reads `og:image` first (pages also embed unrelated site-wide assets), then falls back to CDN patterns
-4. Only the latest request may update the screen (`loadSequence`); state (`displayedDate`, `lastcomic`) is committed on success, failures roll back and offer Retry
-5. Comic displayed with animations: `'next'`/`'previous'` (throw-out), `'morph'` (blur), or `null` (instant)
+4. Only the latest request may update the screen (`loadSequence`); state (`displayedDate`, `lastcomic`) is committed on success, failures roll back and offer Retry (also retried automatically on the `online` event)
+5. Comic displayed with animations: adjacent days (`Core.adjacentDirection`) throw out left/right, any other jump uses `'morph'` (blur), first load is instant; the decoded size is written to the `<img>` width/height to avoid layout shift
 6. Adjacent comics preloaded via `preloadAdjacentComics()` (populates the same URL cache)
 
 ### Dates
@@ -43,7 +43,7 @@ Use `$()` for getElementById: `$('comic')`, `$('DatePicker')`, `$('mainToolbar')
 - `stat` - Swipe enabled ("true"/"false")
 - `showfavs` - Show only favorites mode ("true"/"false")
 - `lastdate` - Remember last comic setting
-- `toolbarPos` - JSON object `{top, left, belowComic?, offsetFromComic?}`
+- `toolbarPos` - JSON object `{top, left, belowComic?, offsetFromComic?}` (`top` in document coordinates: the fixed toolbar is shifted on scroll so it moves with the page)
 - `toolbarOptimal` - Toolbar in auto-centered mode ("true")
 
 ### Favorites Pattern
@@ -87,16 +87,23 @@ Toolbar uses snap-to-optimal positioning between header and comic:
 - `.notification-toast` / `.notification-toast.show` - Toast messages
 - `.icon-button` - Circular action buttons (settings, favorite, share)
 - `.comic-outgoing`, `.throw-out-left/right`, `.fade-in-new` - Comic transition animations
+- `.update-banner`, `.offline-indicator`, `.fav-burst` - Update prompt, offline pill, double-tap heart
+
+### Focus & Touch
+- `--focus-ring` / `--focus-outline` are `none` by default and only set under `@media (hover: hover) and (pointer: fine)`, so programmatic focus moves never paint rings on touch devices; forced-colors mode keeps a `Highlight` outline
+- `-webkit-tap-highlight-color: transparent` lives on the base interactive elements (not in `:focus` rules)
+- The CSP meta tag uses `style-src 'self'`: never add inline `style="..."` attributes or `<style>` blocks (setting `element.style.*` from JS is fine)
 
 ## Service Worker
-Bump `CACHE_NAME` version in `sw.js` when deploying changes (add new app files to `PRECACHE_ASSETS`):
+Bump `CACHE_NAME` version in `sw.js` when deploying changes (add new app files to `PRECACHE_ASSETS`; `tests/assets.test.js` checks they exist):
 ```javascript
-const CACHE_NAME = 'auntyacid-v29';  // Increment version number
+const CACHE_NAME = 'auntyacid-v30';  // Increment version number
 ```
+Install does not call `skipWaiting()`: open pages show a "new version" banner and send `SKIP_WAITING` when the user taps Refresh (then reload on `controllerchange`). Settings shows the active version via `GET_VERSION`.
 
 ## Testing
 - `npm start` - local server on http://127.0.0.1:8000
-- `npm run check` - syntax check; `npm test` - unit tests for `core.js`
+- `npm run check` - syntax check; `npm test` - unit tests for `core.js` and asset/manifest checks
 - Put new pure logic in `core.js` and cover it in `tests/`
 
 ## PWA Manifest

@@ -1,9 +1,42 @@
 // Aunty Acid Comics App - auntyacidapp.pages.dev
 
-// Service Worker Registration
+// Service worker registration. A new worker waits until the user accepts the update banner,
+// so an open page never has its cache generation swapped out from under it.
 if ('serviceWorker' in navigator) {
+	let reloadingForUpdate = false;
+	navigator.serviceWorker.addEventListener('controllerchange', () => {
+		if (!reloadingForUpdate) return;
+		reloadingForUpdate = false;
+		window.location.reload();
+	});
+
 	window.addEventListener('load', () => {
 		navigator.serviceWorker.register('./sw.js', { scope: './' })
+			.then(registration => {
+				const offerUpdate = (worker) => {
+					if (!worker || !navigator.serviceWorker.controller) return;
+					showUpdateBanner(() => {
+						// Resolve the worker at click time: another tab may already have activated it,
+						// or a newer deploy may have replaced it while the banner was showing.
+						const waiting = registration.waiting;
+						if (!waiting) {
+							window.location.reload();
+							return;
+						}
+						reloadingForUpdate = true;
+						waiting.postMessage({ type: 'SKIP_WAITING' });
+					});
+				};
+
+				// An update may already be waiting from a previous visit
+				offerUpdate(registration.waiting);
+				registration.addEventListener('updatefound', () => {
+					const worker = registration.installing;
+					worker?.addEventListener('statechange', () => {
+						if (worker.state === 'installed') offerUpdate(worker);
+					});
+				});
+			})
 			.catch(() => {});
 	});
 }
@@ -15,6 +48,11 @@ const CORS_PROXY = 'https://corsproxy.garfieldapp.workers.dev/cors-proxy?';
 const IMAGE_URL_CACHE_KEY = 'imageUrls';
 const IMAGE_URL_CACHE_LIMIT = 500;
 const MAX_SAME_IMAGE_SKIPS = 7;
+// Bound every load so a stalled proxy or CDN surfaces a Retry instead of spinning forever.
+const PAGE_LOOKUP_TIMEOUT_MS = 12000;
+const IMAGE_LOAD_TIMEOUT_MS = 12000;
+const DOUBLE_TAP_DELAY_MS = 300;
+const TAP_MAX_MOVEMENT = 24;
 
 // Date the user asked for (drives navigation and the date picker while a load is pending)
 let selectedDate = null;
@@ -24,6 +62,10 @@ let pictureUrl = '';
 let loadSequence = 0;
 let deferredPrompt = null;
 let notificationTimer = null;
+// Last failed load, retried automatically when the connection comes back
+let pendingRetry = null;
+// Element that opened the settings dialog, focused again when it closes
+let settingsOpener = null;
 
 // Helper functions
 const $ = (id) => document.getElementById(id);
@@ -35,7 +77,7 @@ const isFavoritesMode = () => !!$('showfavs')?.checked;
 class ComicLoadError extends Error {
 	constructor(kind, status) {
 		super(kind);
-		this.kind = kind; // 'offline' | 'http' | 'no-image' | 'image' | 'network'
+		this.kind = kind; // 'offline' | 'timeout' | 'http' | 'no-image' | 'image' | 'network'
 		this.status = status;
 	}
 }
@@ -72,13 +114,20 @@ function forgetImageUrl(ymd) {
 	if (imageUrlCache.delete(ymd)) persistImageUrls();
 }
 
+function timeoutSignal(ms) {
+	return typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+		? AbortSignal.timeout(ms)
+		: undefined;
+}
+
 function getComicImageUrl(ymd) {
 	if (imageUrlCache.has(ymd)) return Promise.resolve(imageUrlCache.get(ymd));
 	if (inflightLookups.has(ymd)) return inflightLookups.get(ymd);
 
-	const lookup = fetch(`${CORS_PROXY}https://www.gocomics.com/aunty-acid/${ymd}`)
-		.catch(() => {
-			throw new ComicLoadError(navigator.onLine === false ? 'offline' : 'network');
+	const lookup = fetch(`${CORS_PROXY}https://www.gocomics.com/aunty-acid/${ymd}`, { signal: timeoutSignal(PAGE_LOOKUP_TIMEOUT_MS) })
+		.catch(error => {
+			if (navigator.onLine === false) throw new ComicLoadError('offline');
+			throw new ComicLoadError(error?.name === 'TimeoutError' ? 'timeout' : 'network');
 		})
 		.then(response => {
 			if (!response.ok) throw new ComicLoadError('http', response.status);
@@ -107,12 +156,24 @@ function applyImageSource(img, url) {
 	img.src = url;
 }
 
-// Resolves once the image is decodable (from network, HTTP cache or the SW image cache)
+// Resolves with the decoded size once the image is ready (from network, HTTP cache or the SW
+// image cache); rejects on error or after IMAGE_LOAD_TIMEOUT_MS.
 function loadImage(url) {
 	return new Promise((resolve, reject) => {
 		const img = new Image();
-		img.onload = () => resolve(url);
-		img.onerror = () => reject(new ComicLoadError(navigator.onLine === false ? 'offline' : 'image'));
+		const finish = (error) => {
+			clearTimeout(timer);
+			img.onload = img.onerror = null;
+			if (error) {
+				img.removeAttribute('src');
+				reject(error);
+			} else {
+				resolve({ url, width: img.naturalWidth, height: img.naturalHeight });
+			}
+		};
+		const timer = setTimeout(() => finish(new ComicLoadError(navigator.onLine === false ? 'offline' : 'timeout')), IMAGE_LOAD_TIMEOUT_MS);
+		img.onload = () => finish(img.naturalWidth ? null : new ComicLoadError('image'));
+		img.onerror = () => finish(new ComicLoadError(navigator.onLine === false ? 'offline' : 'image'));
 		applyImageSource(img, url);
 	});
 }
@@ -179,6 +240,90 @@ function hideNotification() {
 	$('notificationToast')?.classList.remove('show');
 }
 
+function showUpdateBanner(onAccept) {
+	if ($('updateBanner')) return;
+
+	const banner = document.createElement('div');
+	banner.id = 'updateBanner';
+	banner.className = 'update-banner';
+	banner.setAttribute('role', 'status');
+
+	const message = document.createElement('p');
+	message.textContent = 'A new version of Aunty Acid is available.';
+
+	const button = document.createElement('button');
+	button.type = 'button';
+	button.className = 'update-banner-button';
+	button.textContent = 'Refresh';
+	button.addEventListener('click', () => {
+		button.disabled = true;
+		onAccept();
+	});
+
+	banner.append(message, button);
+	document.body.appendChild(banner);
+}
+
+function updateConnectionStatus() {
+	const indicator = $('offlineIndicator');
+	if (indicator) indicator.hidden = navigator.onLine !== false;
+}
+
+// Brief heart burst over the comic, used for double-tap favoriting
+function showFavoriteBurst(added) {
+	const wrapper = $('comic-wrapper');
+	if (!wrapper) return;
+	wrapper.querySelector('.fav-burst')?.remove();
+
+	const svgNs = 'http://www.w3.org/2000/svg';
+	const svg = document.createElementNS(svgNs, 'svg');
+	svg.setAttribute('viewBox', '0 0 24 24');
+	svg.setAttribute('aria-hidden', 'true');
+	svg.classList.add('fav-burst', added ? 'fav-burst-added' : 'fav-burst-removed');
+	const path = document.createElementNS(svgNs, 'path');
+	path.setAttribute('d', 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z');
+	svg.appendChild(path);
+	svg.addEventListener('animationend', () => svg.remove(), { once: true });
+	wrapper.appendChild(svg);
+	// Fallback cleanup when animations are disabled
+	setTimeout(() => svg.remove(), 1200);
+}
+
+// Ask the active service worker which cache generation is serving this page
+function requestServiceWorkerVersion(timeoutMs = 3000) {
+	const worker = navigator.serviceWorker?.controller;
+	if (!worker || typeof MessageChannel !== 'function') return Promise.resolve(null);
+
+	return new Promise(resolve => {
+		const channel = new MessageChannel();
+		const timer = setTimeout(() => {
+			channel.port1.close();
+			resolve(null);
+		}, timeoutMs);
+		channel.port1.onmessage = (event) => {
+			clearTimeout(timer);
+			channel.port1.close();
+			resolve(event.data?.version || null);
+		};
+		try {
+			worker.postMessage({ type: 'GET_VERSION' }, [channel.port2]);
+		} catch {
+			clearTimeout(timer);
+			resolve(null);
+		}
+	});
+}
+
+async function displayAppVersion() {
+	const display = $('appVersion');
+	if (!display || display.dataset.loaded === 'true') return;
+	const version = await requestServiceWorkerVersion();
+	if (version) {
+		display.textContent = `Version ${version}`;
+		display.dataset.loaded = 'true';
+	}
+}
+
 // Settings Panel
 function toggleSettings() {
 	const panel = $('settingsDIV');
@@ -192,10 +337,12 @@ function toggleSettings() {
 function showSettings() {
 	const panel = $('settingsDIV');
 	if (!panel) return;
+	settingsOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 	panel.classList.add('visible');
 	$('settingsBtn')?.setAttribute('aria-expanded', 'true');
 	updateExportButtonState();
-	$('swipe')?.focus();
+	displayAppVersion();
+	($('swipe') || getFocusableElements(panel)[0])?.focus();
 }
 
 function hideSettings({ restoreFocus = false } = {}) {
@@ -203,7 +350,36 @@ function hideSettings({ restoreFocus = false } = {}) {
 	if (!panel?.classList.contains('visible')) return;
 	panel.classList.remove('visible');
 	$('settingsBtn')?.setAttribute('aria-expanded', 'false');
-	if (restoreFocus) $('settingsBtn')?.focus();
+	if (restoreFocus) (settingsOpener?.isConnected ? settingsOpener : $('settingsBtn'))?.focus();
+	settingsOpener = null;
+}
+
+const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+function getFocusableElements(container) {
+	return [...container.querySelectorAll(FOCUSABLE_SELECTOR)]
+		.filter(element => !element.disabled && element.getAttribute('aria-hidden') !== 'true' && element.offsetParent !== null);
+}
+
+// Keep Tab / Shift+Tab inside the modal settings dialog
+function trapFocus(event, container) {
+	const focusable = getFocusableElements(container);
+	if (!focusable.length) {
+		event.preventDefault();
+		return;
+	}
+	const first = focusable[0];
+	const last = focusable[focusable.length - 1];
+	if (!container.contains(document.activeElement)) {
+		event.preventDefault();
+		(event.shiftKey ? last : first).focus();
+	} else if (event.shiftKey && document.activeElement === first) {
+		event.preventDefault();
+		last.focus();
+	} else if (!event.shiftKey && document.activeElement === last) {
+		event.preventDefault();
+		first.focus();
+	}
 }
 
 // ========================================
@@ -264,7 +440,8 @@ function isInSnapZone(top, toolbar) {
  * Store toolbar position with relative metadata
  */
 function storeToolbarPosition(top, left, toolbar) {
-	const positionData = { top, left };
+	// Stored in document coordinates so the toolbar keeps its place relative to the page when scrolled
+	const positionData = { top: top + window.scrollY, left };
 	
 	// Track position relative to comic
 	const comic = $('comic');
@@ -352,7 +529,7 @@ function clampToolbarInView() {
 			const comic = $('comic');
 			const header = document.querySelector('.app-header');
 			
-			let newTop = savedPos.top;
+			let newTop = savedPos.top - window.scrollY;
 			let newLeft = (viewportWidth - toolbarWidth) / 2; // Always center horizontally
 			
 			// If below comic, maintain that relationship
@@ -362,9 +539,11 @@ function clampToolbarInView() {
 				newTop = comicRect.bottom + storedGap;
 			}
 			
-			// Viewport boundary clamping
-			const maxTop = viewportHeight - toolbarHeight - 10;
-			if (newTop < 0) newTop = 0;
+			// Page boundary clamping (the toolbar scrolls with the page, so clamp in document space)
+			const pageHeight = Math.max(viewportHeight, document.documentElement.scrollHeight);
+			const minTop = -window.scrollY;
+			const maxTop = pageHeight - window.scrollY - toolbarHeight - 10;
+			if (newTop < minTop) newTop = minTop;
 			if (newTop > maxTop) newTop = maxTop;
 			
 			// Ensure we don't overlap header/logo
@@ -465,7 +644,7 @@ function initializeToolbar() {
 			});
 		} else {
 			// Apply saved custom position immediately
-			toolbar.style.top = savedPos.top + 'px';
+			toolbar.style.top = (savedPos.top - window.scrollY) + 'px';
 			toolbar.style.left = (window.innerWidth - toolbar.offsetWidth) / 2 + 'px';
 			toolbar.style.transform = 'none';
 		}
@@ -502,6 +681,16 @@ function initializeToolbar() {
 	
 	// Make toolbar draggable (vertical only)
 	makeDraggable(toolbar);
+
+	// The toolbar is position: fixed; move it with the page so it never floats over a scrolled comic
+	let lastScrollY = window.scrollY;
+	window.addEventListener('scroll', () => {
+		const delta = window.scrollY - lastScrollY;
+		lastScrollY = window.scrollY;
+		if (!delta || toolbar.classList.contains('dragging')) return;
+		const top = parseFloat(toolbar.style.top);
+		if (Number.isFinite(top)) toolbar.style.top = `${top - delta}px`;
+	}, { passive: true });
 	
 	// Clamp on resize
 	let resizeTimeout;
@@ -523,6 +712,7 @@ function makeDraggable(element) {
 		if (e.target.closest('.toolbar-button')) return;
 		
 		isDragging = true;
+		element.classList.add('dragging');
 		const clientY = e.touches ? e.touches[0].clientY : e.clientY;
 		startY = clientY;
 		startTop = element.offsetTop;
@@ -552,6 +742,7 @@ function makeDraggable(element) {
 	const onEnd = () => {
 		if (!isDragging) return;
 		isDragging = false;
+		element.classList.remove('dragging');
 		element.style.cursor = 'grab';
 		element.style.transition = '';
 		
@@ -688,6 +879,13 @@ async function handleInstall() {
 	if (installBtn) installBtn.style.display = 'none';
 }
 
+// Also covers installs started from the browser's own menu
+window.addEventListener('appinstalled', () => {
+	deferredPrompt = null;
+	const installBtn = $('installBtn');
+	if (installBtn) installBtn.style.display = 'none';
+});
+
 // ========================================
 // SHARING
 // ========================================
@@ -705,7 +903,11 @@ async function fetchComicFile(url, date) {
 	try {
 		const response = await fetch(url, { mode: 'cors', signal: controller.signal });
 		if (!response.ok) return null;
-		const blob = await response.blob();
+		let blob = await response.blob();
+		// Share targets (notably the Windows share sheet) only preview JPEG/PNG reliably
+		if (!/^image\/(jpeg|png)$/.test(blob.type)) {
+			blob = await convertImageBlob(blob, 'image/jpeg', 0.92).catch(() => blob);
+		}
 		const type = blob.type || 'image/jpeg';
 		const extension = type.includes('png') ? 'png' : type.includes('gif') ? 'gif' : 'jpg';
 		return new File([blob], `aunty-acid-${Core.toYmd(date, '-')}.${extension}`, { type });
@@ -716,7 +918,46 @@ async function fetchComicFile(url, date) {
 	}
 }
 
-async function copyShareLink(url) {
+// Re-encode on a white canvas so transparent images never turn black
+async function convertImageBlob(blob, type, quality) {
+	const blobUrl = URL.createObjectURL(blob);
+	try {
+		const img = await new Promise((resolve, reject) => {
+			const image = new Image();
+			image.onload = () => resolve(image);
+			image.onerror = reject;
+			image.src = blobUrl;
+		});
+		const canvas = document.createElement('canvas');
+		canvas.width = img.naturalWidth;
+		canvas.height = img.naturalHeight;
+		const ctx = canvas.getContext('2d');
+		ctx.fillStyle = '#ffffff';
+		ctx.fillRect(0, 0, canvas.width, canvas.height);
+		ctx.drawImage(img, 0, 0);
+		return await new Promise((resolve, reject) => {
+			canvas.toBlob(result => (result ? resolve(result) : reject(new Error('toBlob failed'))), type, quality);
+		});
+	} finally {
+		URL.revokeObjectURL(blobUrl);
+	}
+}
+
+// Clipboard fallback: the image plus a link when supported, otherwise just the link
+async function copyShareFallback(file, text, url) {
+	if (file && window.ClipboardItem && navigator.clipboard?.write) {
+		try {
+			const png = file.type === 'image/png' ? file : await convertImageBlob(file, 'image/png');
+			await navigator.clipboard.write([new ClipboardItem({
+				'image/png': png,
+				'text/plain': new Blob([text], { type: 'text/plain' })
+			})]);
+			showNotification('Comic and link copied to clipboard!');
+			return;
+		} catch {
+			// Fall back to copying the link only
+		}
+	}
 	try {
 		await navigator.clipboard.writeText(url);
 		showNotification('Link to this comic copied to clipboard!');
@@ -733,16 +974,19 @@ async function Share() {
 
 	const shareUrl = comicShareUrl(displayedDate);
 	const title = `Aunty Acid - ${formatLongDate(displayedDate)}`;
+	const text = `${title}\n${shareUrl}`;
+	const file = await fetchComicFile(pictureUrl, displayedDate);
 
 	if (!navigator.share) {
-		await copyShareLink(shareUrl);
+		await copyShareFallback(file, text, shareUrl);
 		return;
 	}
 
 	try {
-		const file = await fetchComicFile(pictureUrl, displayedDate);
 		if (file && navigator.canShare?.({ files: [file] })) {
-			await navigator.share({ title, text: title, url: shareUrl, files: [file] });
+			// Many targets (WhatsApp, Messages) drop the attachment in favour of a link preview when a
+			// `url` is passed, so the link travels in the text instead.
+			await navigator.share({ title, text, files: [file] });
 		} else {
 			await navigator.share({ title, text: title, url: shareUrl });
 		}
@@ -752,7 +996,7 @@ async function Share() {
 		try {
 			await navigator.share({ title, text: title, url: shareUrl });
 		} catch (fallbackErr) {
-			if (fallbackErr.name !== 'AbortError') await copyShareLink(shareUrl);
+			if (fallbackErr.name !== 'AbortError') await copyShareFallback(file, text, shareUrl);
 		}
 	}
 }
@@ -904,6 +1148,8 @@ function describeLoadError(error, date) {
 	switch (error?.kind) {
 		case 'offline':
 			return "You're offline and this comic isn't saved on this device yet.";
+		case 'timeout':
+			return `The comic for ${when} is taking too long to load.`;
 		case 'http':
 			return `GoComics didn't return the comic for ${when} (error ${error.status}).`;
 		case 'no-image':
@@ -943,8 +1189,8 @@ function showComic(date, direction = null, { fallbackToPrevious = false, skips =
 				}
 			}
 
-			return loadImage(url).then(() => {
-				if (sequence === loadSequence) displayComic(target, url, direction);
+			return loadImage(url).then(size => {
+				if (sequence === loadSequence) displayComic(target, url, direction, size);
 			});
 		})
 		.catch(error => {
@@ -961,18 +1207,19 @@ function showComic(date, direction = null, { fallbackToPrevious = false, skips =
 
 			selectedDate = displayedDate;
 			updateNavState();
-			showNotification(describeLoadError(error, target), 6000, {
-				label: 'Retry',
-				handler: () => showComic(target, direction)
-			});
+			const retry = () => showComic(target, direction, { fallbackToPrevious });
+			pendingRetry = retry;
+			showNotification(describeLoadError(error, target), 6000, { label: 'Retry', handler: retry });
 		});
 }
 
-function displayComic(date, url, direction) {
+function displayComic(date, url, direction, size = null) {
 	const previousPicture = pictureUrl;
+	const previousDate = displayedDate;
 	displayedDate = date;
 	selectedDate = date;
 	pictureUrl = url;
+	pendingRetry = null;
 
 	localStorage.setItem('lastcomic', Core.toYmd(date, '-'));
 
@@ -982,7 +1229,16 @@ function displayComic(date, url, direction) {
 	const comicImg = $('comic');
 	comicImg.alt = `Aunty Acid comic for ${formatLongDate(date)}`;
 	if (url !== previousPicture) {
-		renderComicImage(comicImg, url, previousPicture ? direction : null);
+		// Only neighbouring days slide; longer jumps (favorites, skipped days, date picker) morph
+		const transition = previousPicture
+			? Core.adjacentDirection(previousDate, date) || (direction ? 'morph' : null)
+			: null;
+		renderComicImage(comicImg, url, transition);
+		// Intrinsic size (set after the outgoing clone is made) lets the browser reserve the right space
+		if (size?.width > 0 && size?.height > 0) {
+			comicImg.width = size.width;
+			comicImg.height = size.height;
+		}
 	}
 
 	updateFavIcon(getFavs().includes(Core.toYmd(date)));
@@ -1041,6 +1297,8 @@ function renderComicImage(comicImg, url, direction) {
 		applyImageSource(comicImg, url);
 
 		const startMorph = () => {
+			// Commit the clone's initial styles so the blur/fade actually transitions
+			outgoingClone.offsetHeight;
 			requestAnimationFrame(() => outgoingClone.classList.add('morph-out'));
 			setTimeout(() => outgoingClone.remove(), 600);
 		};
@@ -1072,7 +1330,12 @@ function updateNavState() {
 		picker.disabled = favoritesMode;
 	}
 	const pickerButton = $('DatePickerBtn');
-	if (pickerButton) pickerButton.disabled = favoritesMode;
+	if (pickerButton) {
+		pickerButton.disabled = favoritesMode;
+		const label = `Select date (${formatLongDate(base)})`;
+		pickerButton.title = label;
+		pickerButton.setAttribute('aria-label', label);
+	}
 
 	let noPrevious, noNext, atFirst, atLast;
 	if (favoritesMode) {
@@ -1198,11 +1461,69 @@ const swipeDetection = {
 
 swipeDetection.init();
 
+// Double-tap (touch) or double-click (mouse) the comic to toggle it as a favorite
+function favoriteFromGesture() {
+	if (!displayedDate) return;
+	showFavoriteBurst(!getFavs().includes(Core.toYmd(displayedDate)));
+	Addfav();
+}
+
+function initComicDoubleTap() {
+	const target = $('comic-wrapper');
+	if (!target) return;
+	let start = null;
+	let lastTap = null;
+	let suppressDblClickUntil = 0;
+
+	target.addEventListener('touchstart', (e) => {
+		const touch = e.touches.length === 1 ? e.touches[0] : null;
+		start = touch ? { x: touch.clientX, y: touch.clientY, time: Date.now() } : null;
+		if (!touch) lastTap = null;
+	}, { passive: true });
+
+	target.addEventListener('touchend', (e) => {
+		const touch = e.changedTouches[0];
+		if (!start || !touch) return;
+		const now = Date.now();
+		const isTap = Math.abs(touch.clientX - start.x) <= TAP_MAX_MOVEMENT &&
+			Math.abs(touch.clientY - start.y) <= TAP_MAX_MOVEMENT &&
+			now - start.time <= 500;
+		start = null;
+		if (!isTap) {
+			lastTap = null;
+			return;
+		}
+		if (lastTap && now - lastTap.time <= DOUBLE_TAP_DELAY_MS &&
+			Math.abs(touch.clientX - lastTap.x) <= TAP_MAX_MOVEMENT &&
+			Math.abs(touch.clientY - lastTap.y) <= TAP_MAX_MOVEMENT) {
+			// Stops double-tap zoom and the synthesized dblclick that would toggle a second time
+			if (e.cancelable) e.preventDefault();
+			lastTap = null;
+			suppressDblClickUntil = now + 500;
+			favoriteFromGesture();
+			return;
+		}
+		lastTap = { x: touch.clientX, y: touch.clientY, time: now };
+	}, { passive: false });
+
+	target.addEventListener('dblclick', (e) => {
+		if (Date.now() < suppressDblClickUntil) return;
+		e.preventDefault();
+		window.getSelection?.()?.removeAllRanges();
+		favoriteFromGesture();
+	});
+}
+
 // Keyboard shortcuts: Left/Right previous/next, Home/End first/latest, Esc closes settings
 document.addEventListener('keydown', (e) => {
-	const settingsOpen = $('settingsDIV')?.classList.contains('visible');
+	const panel = $('settingsDIV');
+	const settingsOpen = panel?.classList.contains('visible');
 	if (e.key === 'Escape') {
 		if (settingsOpen) hideSettings({ restoreFocus: true });
+		return;
+	}
+	if (settingsOpen && e.key === 'Tab') {
+		trapFocus(e, panel);
 		return;
 	}
 	if (settingsOpen || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
@@ -1232,6 +1553,15 @@ document.addEventListener('DOMContentLoaded', () => {
 	$('DatePickerBtn')?.addEventListener('click', openDatePicker);
 
 	initializeToolbar();
+	initComicDoubleTap();
+
+	// Connection status: show the offline pill, and retry a failed load once the network returns
+	updateConnectionStatus();
+	window.addEventListener('offline', updateConnectionStatus);
+	window.addEventListener('online', () => {
+		updateConnectionStatus();
+		if (pendingRetry) pendingRetry();
+	});
 
 	// Icon buttons
 	$('settingsBtn')?.addEventListener('click', toggleSettings);

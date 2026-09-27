@@ -51,6 +51,17 @@
 		return !!a && !!b && toYmd(a) === toYmd(b);
 	}
 
+	/**
+	 * 'next' / 'previous' when `target` is the calendar day right after / before `current`,
+	 * otherwise null. Only adjacent comics slide; longer jumps use the morph transition.
+	 */
+	function adjacentDirection(current, target) {
+		if (!current || !target) return null;
+		if (sameDay(addDays(current, 1), target)) return 'next';
+		if (sameDay(addDays(current, -1), target)) return 'previous';
+		return null;
+	}
+
 	function clampDate(date, min, max) {
 		if (date < min) return startOfDay(min);
 		if (date > max) return startOfDay(max);
@@ -88,13 +99,12 @@
 	function extractComicImageUrl(html) {
 		if (typeof html !== 'string' || !html) return null;
 
-		const ogPatterns = [
-			/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i,
-			/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i
-		];
-		for (const pattern of ogPatterns) {
-			const match = html.match(pattern);
-			if (match && isComicImageUrl(match[1])) return match[1];
+		// Accept property= or name=, either attribute order, and HTML-escaped ampersands.
+		for (const tag of html.match(/<meta\b[^>]*>/gi) || []) {
+			if (!/(?:property|name)\s*=\s*(["'])og:image\1/i.test(tag)) continue;
+			const content = tag.match(/content\s*=\s*(["'])(.*?)\1/i);
+			const url = content && content[2].trim().replace(/&amp;/gi, '&');
+			if (url && isComicImageUrl(url)) return url;
 		}
 
 		let match = html.match(/https:\/\/featureassets\.gocomics\.com\/assets\/[a-f0-9]+/);
@@ -164,6 +174,7 @@
 		startOfDay,
 		addDays,
 		sameDay,
+		adjacentDirection,
 		clampDate,
 		parseStoredDate,
 		isComicImageUrl,
