@@ -1,7 +1,7 @@
 # Aunty Acid PWA - AI Coding Instructions
 
 ## Project Overview
-A Progressive Web App for browsing Aunty Acid comic strips from GoComics. Deployed to Cloudflare Pages at `auntyacidapp.pages.dev`. Part of a family of comic apps (shares patterns with GarfieldApp, DirkJanApp).
+A Progressive Web App for browsing Aunty Acid comic strips from GoComics. Deployed to GitHub Pages at `https://my-pwa-apps.github.io/auntyacidapp/`. Part of a family of comic apps (shares patterns with GarfieldApp, DirkJanApp).
 
 ## Architecture
 
@@ -28,7 +28,7 @@ Never use `new Date('YYYY-MM-DD')` (UTC, shifts the day west of Greenwich). Use 
 ### Key Constants
 ```javascript
 const START_DATE = Core.parseYmd('2013-05-06');  // First Aunty Acid comic
-const CORS_PROXY = 'https://corsproxy.garfieldapp.workers.dev/cors-proxy?';
+const CORS_PROXY = 'https://auntyacid-corsproxy.garfieldapp.workers.dev/?';  // target URL must be encodeURIComponent()-ed
 ```
 
 ## Code Patterns
@@ -97,7 +97,7 @@ Toolbar uses snap-to-optimal positioning between header and comic:
 ## Service Worker
 Bump `CACHE_NAME` version in `sw.js` when deploying changes (add new app files to `PRECACHE_ASSETS`; `tests/assets.test.js` checks they exist):
 ```javascript
-const CACHE_NAME = 'auntyacid-v31';  // Increment version number
+const CACHE_NAME = 'auntyacid-v32';  // Increment version number
 ```
 Install does not call `skipWaiting()`: open pages show a "new version" banner and send `SKIP_WAITING` when the user taps Refresh (then reload on `controllerchange`). Settings shows the active version via `GET_VERSION`.
 
@@ -115,8 +115,8 @@ Use relative paths (`./`) for all URLs to ensure cross-platform compatibility (A
 ```
 
 ## Deployment
-- Hosted on Cloudflare Pages at `auntyacidapp.pages.dev`
-- Push to main branch triggers auto-deploy
+- Hosted on GitHub Pages at `https://my-pwa-apps.github.io/auntyacidapp/`
+- Static files served by GitHub Pages
 - No build step required (static files)
 
 ## Related Projects

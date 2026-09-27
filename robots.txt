@@ -1,5 +1,5 @@
 User-Agent: *
 Allow: /
 
-Sitemap: https://auntyacidapp.pages.dev/sitemap.xml
+Sitemap: https://my-pwa-apps.github.io/auntyacidapp/sitemap.xml
 

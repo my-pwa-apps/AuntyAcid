@@ -93,8 +93,8 @@
   "related_applications": [
     {
       "platform": "windows",
-      "url": "https://auntyacidapp.pages.dev/",
-      "id": "auntyacidapp.pages.dev"
+      "url": "https://my-pwa-apps.github.io/auntyacidapp/",
+      "id": "my-pwa-apps.github.io/auntyacidapp"
     }
   ],
   "edge_side_panel": {

@@ -1,6 +1,6 @@
 # Aunty Acid Comics PWA
 
-A progressive web app for reading [Aunty Acid](https://www.gocomics.com/aunty-acid) comic strips by Ged Backland, hosted at **https://auntyacidapp.pages.dev**.
+A progressive web app for reading [Aunty Acid](https://www.gocomics.com/aunty-acid) comic strips by Ged Backland, hosted at **https://my-pwa-apps.github.io/auntyacidapp/**.
 
 Features: date navigation (first / previous / random / date picker / next / latest), swipe and keyboard navigation, favorites with import/export, double-tap (or double-click) a comic to favorite it, favorites-only browsing, sharing with deep links (`?date=YYYY-MM-DD`; the comic image is attached when the platform supports it, or copied to the clipboard with the link), offline viewing of comics you have already opened with an offline indicator and automatic retry when the connection returns, and an in-app "new version available" prompt.
 
@@ -17,7 +17,7 @@ The app is a static site with no build step:
 | `sw.js` | Service worker: app-shell caching, a bounded cache of viewed comic images, and the user-accepted update flow |
 | `manifest.webmanifest` | PWA manifest |
 
-For each date the app fetches the GoComics comic page through the CORS proxy (`corsproxy.garfieldapp.workers.dev`) and reads the strip URL from the page's `og:image` tag. Dates without their own strip (for example today before GoComics publishes it, or any future date) are served the latest comic instead, so the page's `og:url`/canonical date is checked: a mismatching page is never stored under the requested date, and navigation moves on to the day actually served or past the empty day. Resolved image URLs are cached in `localStorage` (`imageUrlsV2`), so revisiting a date doesn't hit the proxy again. Page lookups and image loads are bounded (12 s each) so a stalled request surfaces a Retry instead of hanging.
+For each date the app fetches the GoComics comic page through the CORS proxy (`auntyacid-corsproxy.garfieldapp.workers.dev`, which only allows the app's origins) and reads the strip URL from the page's `og:image` tag. Dates without their own strip (for example today before GoComics publishes it, or any future date) are served the latest comic instead, so the page's `og:url`/canonical date is checked: a mismatching page is never stored under the requested date, and navigation moves on to the day actually served or past the empty day. Resolved image URLs are cached in `localStorage` (`imageUrlsV2`), so revisiting a date doesn't hit the proxy again. Page lookups and image loads are bounded (12 s each) so a stalled request surfaces a Retry instead of hanging.
 
 ## Local development
 
@@ -35,7 +35,7 @@ Date logic is tested in several timezones in CI; to reproduce locally, set `TZ` 
 
 ## Deployment
 
-Pushing to `main` deploys to Cloudflare Pages (static files, no build command). When changing any cached file, bump `CACHE_NAME` in `sw.js`; open clients then show a "new version available" banner, and the new worker only takes over once the user taps Refresh (the active version is shown at the bottom of Settings). `tests/assets.test.js` fails if a precached, manifest, or `index.html` file is missing, or a manifest PNG's declared size doesn't match the file. CI (`.github/workflows/ci.yml`) runs the checks and tests on every push and pull request.
+The app is served as static files from GitHub Pages (no build command). When changing any cached file, bump `CACHE_NAME` in `sw.js`; open clients then show a "new version available" banner, and the new worker only takes over once the user taps Refresh (the active version is shown at the bottom of Settings). `tests/assets.test.js` fails if a precached, manifest, or `index.html` file is missing, or a manifest PNG's declared size doesn't match the file. CI (`.github/workflows/ci.yml`) runs the checks and tests on every push and pull request.
 
 ## Data and storage
 

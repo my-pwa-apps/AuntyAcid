@@ -1,4 +1,4 @@
-// Aunty Acid Comics App - auntyacidapp.pages.dev
+// Aunty Acid Comics App - my-pwa-apps.github.io/auntyacidapp
 
 // Service worker registration. A new worker waits until the user accepts the update banner,
 // so an open page never has its cache generation swapped out from under it.
@@ -44,7 +44,7 @@ if ('serviceWorker' in navigator) {
 const Core = window.AuntyAcidCore;
 
 const START_DATE = Core.parseYmd('2013-05-06');
-const CORS_PROXY = 'https://corsproxy.garfieldapp.workers.dev/cors-proxy?';
+const CORS_PROXY = 'https://auntyacid-corsproxy.garfieldapp.workers.dev/?';
 // v2: v1 could hold a neighbouring day's strip for dates GoComics redirected (e.g. not yet published)
 const IMAGE_URL_CACHE_KEY = 'imageUrlsV2';
 const LEGACY_IMAGE_URL_CACHE_KEYS = ['imageUrls'];
@@ -129,7 +129,7 @@ function getComicImageUrl(ymd) {
 	if (imageUrlCache.has(ymd)) return Promise.resolve(imageUrlCache.get(ymd));
 	if (inflightLookups.has(ymd)) return inflightLookups.get(ymd);
 
-	const lookup = fetch(`${CORS_PROXY}https://www.gocomics.com/aunty-acid/${ymd}`, { signal: timeoutSignal(PAGE_LOOKUP_TIMEOUT_MS) })
+	const lookup = fetch(`${CORS_PROXY}${encodeURIComponent(`https://www.gocomics.com/aunty-acid/${ymd}`)}`, { signal: timeoutSignal(PAGE_LOOKUP_TIMEOUT_MS) })
 		.catch(error => {
 			if (navigator.onLine === false) throw new ComicLoadError('offline');
 			throw new ComicLoadError(error?.name === 'TimeoutError' ? 'timeout' : 'network');

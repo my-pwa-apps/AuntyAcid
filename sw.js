@@ -1,4 +1,4 @@
-const CACHE_NAME = 'auntyacid-v31';
+const CACHE_NAME = 'auntyacid-v32';
 const VERSION = CACHE_NAME.replace('auntyacid-', '');
 // Comic images are kept across app versions so previously viewed comics work offline.
 const IMAGE_CACHE_NAME = 'auntyacid-images-v1';

@@ -124,7 +124,7 @@ Scope: full repository review (`app.js`, `index.html`, `main.css`, `sw.js`, `man
   **Problem:** Regressions in the scraper (which depends on third-party HTML) and date logic ship silently.  
   **Impact:** Recurrence of critical defects; GoComics markup changes go unnoticed.  
   **Recommended solution:** Move pure helpers (`extractComicImageUrl`, date helpers, favorites validation) into a small ES module or expose them for Node; add `node --test` tests with saved HTML fixtures (no dependencies needed); add a GitHub Action running `node --check` + tests on push.  
-  **Regression considerations:** App must remain a no-build static site deployable by Cloudflare Pages.  
+  **Regression considerations:** App must remain a no-build static site deployable by GitHub Pages.  
   **Acceptance criteria:** `node --test` runs locally and in CI and covers the Critical/High fixes.  
   **Validation:** CI green on a PR.  
   **Estimated effort:** Medium  
