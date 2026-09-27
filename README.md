@@ -17,7 +17,7 @@ The app is a static site with no build step:
 | `sw.js` | Service worker: app-shell caching, a bounded cache of viewed comic images, and the user-accepted update flow |
 | `manifest.webmanifest` | PWA manifest |
 
-For each date the app fetches the GoComics comic page through the CORS proxy (`corsproxy.garfieldapp.workers.dev`) and reads the strip URL from the page's `og:image` tag. Resolved image URLs are cached in `localStorage` (`imageUrls`), so revisiting a date doesn't hit the proxy again. Page lookups and image loads are bounded (12 s each) so a stalled request surfaces a Retry instead of hanging.
+For each date the app fetches the GoComics comic page through the CORS proxy (`corsproxy.garfieldapp.workers.dev`) and reads the strip URL from the page's `og:image` tag. Dates without their own strip (for example today before GoComics publishes it, or any future date) are served the latest comic instead, so the page's `og:url`/canonical date is checked: a mismatching page is never stored under the requested date, and navigation moves on to the day actually served or past the empty day. Resolved image URLs are cached in `localStorage` (`imageUrlsV2`), so revisiting a date doesn't hit the proxy again. Page lookups and image loads are bounded (12 s each) so a stalled request surfaces a Retry instead of hanging.
 
 ## Local development
 
@@ -39,6 +39,6 @@ Pushing to `main` deploys to Cloudflare Pages (static files, no build command). 
 
 ## Data and storage
 
-`localStorage` keys: `favs` (array of `YYYY/MM/DD`), `lastcomic` (`YYYY-MM-DD`), `imageUrls` (date → image URL), `stat` (swipe), `showfavs`, `lastdate`, `toolbarPos`, `toolbarOptimal`.
+`localStorage` keys: `favs` (array of `YYYY/MM/DD`), `lastcomic` (`YYYY-MM-DD`), `imageUrlsV2` (date → image URL), `stat` (swipe), `showfavs`, `lastdate`, `toolbarPos`, `toolbarOptimal`.
 
 Comics are © Ged Backland, distributed by GoComics. This app is an unofficial reader.

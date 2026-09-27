@@ -7,7 +7,7 @@ A Progressive Web App for browsing Aunty Acid comic strips from GoComics. Deploy
 
 ### Core Files (in repository root)
 - `index.html` - Single-page app with toolbar, settings panel, notification toast
-- `core.js` - Pure, DOM-free helpers (exposed as `window.AuntyAcidCore` / CommonJS for tests): `extractComicImageUrl`, local-date helpers (`parseYmd`, `toYmd`, `addDays`, `clampDate`, `adjacentDirection`), `sanitizeFavorites`, `safeJsonParse`, `favoriteNeighbors`
+- `core.js` - Pure, DOM-free helpers (exposed as `window.AuntyAcidCore` / CommonJS for tests): `extractComicImageUrl`, `resolveComicPage`, `extractComicPageDate`, local-date helpers (`parseYmd`, `toYmd`, `addDays`, `clampDate`, `adjacentDirection`), `sanitizeFavorites`, `safeJsonParse`, `favoriteNeighbors`
 - `app.js` - Application logic: navigation, loading, favorites (incl. double-tap), sharing, swipe/keyboard, draggable toolbar, SW update banner, offline indicator
 - `main.css` - Pink/purple themed styles with CSS custom properties
 - `sw.js` - Service worker: stale-while-revalidate app shell + navigation fallback + bounded cache of comic images (`auntyacid-images-v1`); waits for the user to accept updates (`SKIP_WAITING`), answers `GET_VERSION`
@@ -17,7 +17,7 @@ A Progressive Web App for browsing Aunty Acid comic strips from GoComics. Deploy
 ### Comic Data Flow
 1. User navigates (buttons/swipe/keyboard/date picker) -> `showComic(date, direction)`
 2. `getComicImageUrl(ymd)` returns a cached URL or fetches the GoComics page via the CORS proxy (in-flight requests are deduplicated; bounded by `PAGE_LOOKUP_TIMEOUT_MS`)
-3. `Core.extractComicImageUrl()` reads `og:image` first (pages also embed unrelated site-wide assets), then falls back to CDN patterns
+3. `Core.resolveComicPage(html, ymd)` reads `og:image` (pages also embed unrelated site-wide assets) and the page's own date from `og:url`/canonical. Dates without a strip (not yet published, future) are served the **latest** comic, so a page whose date differs from the requested one is a `'redirect'` error: its URL is cached under the day it belongs to, and `showComic` follows it (jumps, or when it lies in the direction of travel) or steps past the empty day. The loose CDN-pattern fallback is only trusted on the requested day's own page
 4. Only the latest request may update the screen (`loadSequence`); state (`displayedDate`, `lastcomic`) is committed on success, failures roll back and offer Retry (also retried automatically on the `online` event)
 5. Comic displayed with animations: adjacent days (`Core.adjacentDirection`) throw out left/right, any other jump uses `'morph'` (blur), first load is instant; the decoded size is written to the `<img>` width/height to avoid layout shift
 6. Adjacent comics preloaded via `preloadAdjacentComics()` (populates the same URL cache)
@@ -39,7 +39,7 @@ Use `$()` for getElementById: `$('comic')`, `$('DatePicker')`, `$('mainToolbar')
 ### LocalStorage Keys
 - `favs` - JSON array of favorite dates (format: "YYYY/MM/DD")
 - `lastcomic` - Last viewed comic date ("YYYY-MM-DD"; legacy `Date.toString()` values are still read)
-- `imageUrls` - JSON object of date ("YYYY/MM/DD") -> comic image URL (capped, today excluded)
+- `imageUrlsV2` - JSON object of date ("YYYY/MM/DD") -> comic image URL (capped, today excluded; the old `imageUrls` key is deleted on startup because it could hold redirected days)
 - `stat` - Swipe enabled ("true"/"false")
 - `showfavs` - Show only favorites mode ("true"/"false")
 - `lastdate` - Remember last comic setting
@@ -97,7 +97,7 @@ Toolbar uses snap-to-optimal positioning between header and comic:
 ## Service Worker
 Bump `CACHE_NAME` version in `sw.js` when deploying changes (add new app files to `PRECACHE_ASSETS`; `tests/assets.test.js` checks they exist):
 ```javascript
-const CACHE_NAME = 'auntyacid-v30';  // Increment version number
+const CACHE_NAME = 'auntyacid-v31';  // Increment version number
 ```
 Install does not call `skipWaiting()`: open pages show a "new version" banner and send `SKIP_WAITING` when the user taps Refresh (then reload on `controllerchange`). Settings shows the active version via `GET_VERSION`.
 

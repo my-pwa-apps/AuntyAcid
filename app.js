@@ -45,7 +45,9 @@ const Core = window.AuntyAcidCore;
 
 const START_DATE = Core.parseYmd('2013-05-06');
 const CORS_PROXY = 'https://corsproxy.garfieldapp.workers.dev/cors-proxy?';
-const IMAGE_URL_CACHE_KEY = 'imageUrls';
+// v2: v1 could hold a neighbouring day's strip for dates GoComics redirected (e.g. not yet published)
+const IMAGE_URL_CACHE_KEY = 'imageUrlsV2';
+const LEGACY_IMAGE_URL_CACHE_KEYS = ['imageUrls'];
 const IMAGE_URL_CACHE_LIMIT = 500;
 const MAX_SAME_IMAGE_SKIPS = 7;
 // Bound every load so a stalled proxy or CDN surfaces a Retry instead of spinning forever.
@@ -75,16 +77,19 @@ const setFavs = (favs) => localStorage.setItem('favs', JSON.stringify(favs));
 const isFavoritesMode = () => !!$('showfavs')?.checked;
 
 class ComicLoadError extends Error {
-	constructor(kind, status) {
+	constructor(kind, status, redirectedTo = null) {
 		super(kind);
-		this.kind = kind; // 'offline' | 'timeout' | 'http' | 'no-image' | 'image' | 'network'
+		this.kind = kind; // 'offline' | 'timeout' | 'http' | 'no-image' | 'redirect' | 'image' | 'network'
 		this.status = status;
+		this.redirectedTo = redirectedTo; // 'YYYY/MM/DD' the page was really for (kind 'redirect')
 	}
 }
 
 // ========================================
 // COMIC IMAGE URL LOOKUP (cached + deduplicated)
 // ========================================
+
+for (const key of LEGACY_IMAGE_URL_CACHE_KEYS) localStorage.removeItem(key);
 
 // Comic asset URLs never change for a date, so they are cached (and persisted for offline use).
 const imageUrlCache = new Map(Object.entries(Core.safeJsonParse(localStorage.getItem(IMAGE_URL_CACHE_KEY), {}))
@@ -134,10 +139,16 @@ function getComicImageUrl(ymd) {
 			return response.text();
 		})
 		.then(html => {
-			const url = Core.extractComicImageUrl(html);
-			if (!url) throw new ComicLoadError('no-image');
-			rememberImageUrl(ymd, url);
-			return url;
+			const page = Core.resolveComicPage(html, ymd);
+			if (!page.url) throw new ComicLoadError('no-image');
+			if (page.date !== ymd) {
+				// GoComics served another day's page (this date has no strip of its own, e.g. not
+				// published yet). Cache it under the day it belongs to, never under the requested one.
+				if (Core.isValidFavorite(page.date, START_DATE, todayDate())) rememberImageUrl(page.date, page.url);
+				throw new ComicLoadError('redirect', undefined, page.date);
+			}
+			rememberImageUrl(ymd, page.url);
+			return page.url;
 		})
 		.finally(() => inflightLookups.delete(ymd));
 
@@ -1154,6 +1165,8 @@ function describeLoadError(error, date) {
 			return `GoComics didn't return the comic for ${when} (error ${error.status}).`;
 		case 'no-image':
 			return `No comic found for ${when}.`;
+		case 'redirect':
+			return `There's no comic for ${when} yet.`;
 		case 'image':
 			return `Couldn't load the comic image for ${when}.`;
 		default:
@@ -1171,7 +1184,11 @@ function showComic(date, direction = null, { fallbackToPrevious = false, skips =
 	const ymd = Core.toYmd(target);
 	const sequence = ++loadSequence;
 	const favoritesMode = isFavoritesMode();
+	const step = direction === 'next' ? 1 : direction === 'previous' ? -1 : 0;
+	const inRange = (day) => !!day && day >= START_DATE && day <= todayDate();
 
+	// Any new navigation supersedes an earlier failed load that was waiting to be retried
+	pendingRetry = null;
 	selectedDate = target;
 	updateNavState();
 
@@ -1180,10 +1197,9 @@ function showComic(date, direction = null, { fallbackToPrevious = false, skips =
 			if (sequence !== loadSequence) return;
 
 			// A day without its own strip can resolve to the one already on screen; keep stepping.
-			const step = direction === 'next' ? 1 : direction === 'previous' ? -1 : 0;
 			if (url === pictureUrl && step && !favoritesMode && skips < MAX_SAME_IMAGE_SKIPS) {
 				const nextTarget = Core.addDays(target, step);
-				if (nextTarget >= START_DATE && nextTarget <= todayDate()) {
+				if (inRange(nextTarget)) {
 					showComic(nextTarget, direction, { skips: skips + 1 });
 					return;
 				}
@@ -1199,8 +1215,23 @@ function showComic(date, direction = null, { fallbackToPrevious = false, skips =
 			// The image URL may be stale; look the page up again next time (unless simply offline)
 			if (error?.kind === 'image') forgetImageUrl(ymd);
 
+			// This date has no strip of its own: show the day GoComics served when it lies in the
+			// direction of travel (or for jumps), otherwise keep stepping past the empty day.
+			if (error?.kind === 'redirect' && !favoritesMode) {
+				const actual = Core.parseYmd(error.redirectedTo);
+				if (inRange(actual) && (step === 0 || (actual - target) * step > 0)) {
+					showComic(actual, direction, { skips });
+					return;
+				}
+				const nextTarget = Core.addDays(target, step);
+				if (step && skips < MAX_SAME_IMAGE_SKIPS && inRange(nextTarget)) {
+					showComic(nextTarget, direction, { skips: skips + 1 });
+					return;
+				}
+			}
+
 			// Today's strip may not be published yet in the user's timezone
-			if (fallbackToPrevious && Core.sameDay(target, todayDate()) && (error.kind === 'http' || error.kind === 'no-image')) {
+			if (fallbackToPrevious && Core.sameDay(target, todayDate()) && ['http', 'no-image', 'redirect'].includes(error?.kind)) {
 				showComic(Core.addDays(target, -1), direction);
 				return;
 			}
@@ -1215,7 +1246,12 @@ function showComic(date, direction = null, { fallbackToPrevious = false, skips =
 
 function displayComic(date, url, direction, size = null) {
 	const previousPicture = pictureUrl;
-	const previousDate = displayedDate;
+	// Only neighbouring days slide; longer jumps (favorites, skipped days, date picker) morph.
+	// Decided before any state is committed so a failure here can't leave state and screen out of sync.
+	const transition = previousPicture && url !== previousPicture
+		? Core.adjacentDirection(displayedDate, date) || (direction ? 'morph' : null)
+		: null;
+
 	displayedDate = date;
 	selectedDate = date;
 	pictureUrl = url;
@@ -1229,10 +1265,6 @@ function displayComic(date, url, direction, size = null) {
 	const comicImg = $('comic');
 	comicImg.alt = `Aunty Acid comic for ${formatLongDate(date)}`;
 	if (url !== previousPicture) {
-		// Only neighbouring days slide; longer jumps (favorites, skipped days, date picker) morph
-		const transition = previousPicture
-			? Core.adjacentDirection(previousDate, date) || (direction ? 'morph' : null)
-			: null;
 		renderComicImage(comicImg, url, transition);
 		// Intrinsic size (set after the outgoing clone is made) lets the browser reserve the right space
 		if (size?.width > 0 && size?.height > 0) {

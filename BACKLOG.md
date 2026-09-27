@@ -16,6 +16,7 @@ Features and fixes from [GarfieldApp](https://github.com/my-pwa-apps/GarfieldApp
 - [x] **`og:image` extraction hardening** — any meta tag order, `property=` or `name=`, `&amp;` decoding.
 - [x] **Search/social metadata** — removed `keywords`, `twitter:card` `summary` for the square icon, `og:image:type`, JSON-LD `EntertainmentApplication` / `@id` / `mainEntityOfPage`, real screenshots.
 - [x] **Content-Security-Policy** meta tag.
+- [x] **Wrong comic for dates without their own strip** — GoComics serves the *latest* comic (with `og:url` of that day) for unpublished/future dates, e.g. "today" in timezones ahead of US Eastern. The page date is now checked (`Core.resolveComicPage`, as GarfieldApp does via `og:url`/canonical): the strip is cached under the day it belongs to, jumps show that day, stepping skips the empty day, and the loose CDN fallback is only used on the requested day's page. The `imageUrls` cache is replaced by `imageUrlsV2` because old entries could hold such mappings.
 - [x] **Manifest screenshots declared with wrong sizes/form factor** (1280x720 "wide" vs. actual 726x1300 portrait) — fixed, and `tests/assets.test.js` now guards precache/manifest/index references and PNG sizes.
 - [ ] **Wide (desktop) install screenshot** — Chrome's richer desktop install dialog needs a `form_factor: "wide"` screenshot; none exists yet.
 - [ ] **IndexNow** — GarfieldApp pings IndexNow after production deploys; would need a key file and a workflow here.

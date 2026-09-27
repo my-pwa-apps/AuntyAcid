@@ -51,6 +51,40 @@ test('extractComicImageUrl skips a foreign og:image and uses a later valid one',
 	assert.equal(Core.extractComicImageUrl(html), STRIP);
 });
 
+// Mirrors live GoComics markup: a date without its own strip (not yet published / future)
+// serves the latest comic, with og:url and canonical pointing at that comic's date.
+function datedPage(pageDate, { og = STRIP, canonical = true } = {}) {
+	const url = `https://www.gocomics.com/aunty-acid/${pageDate}`;
+	return `<html><head>${canonical ? `<link rel="canonical" href="${url}"/>` : ''}
+		<meta property="og:url" content="${url}"/>
+		${og ? `<meta property="og:image" content="${og}"/>` : ''}
+		</head><body><img src="${SITE_ASSET}"><img src="${STRIP}"></body></html>`;
+}
+
+test('extractComicPageDate reads og:url, then the canonical link', () => {
+	assert.equal(Core.extractComicPageDate(datedPage('2026/09/27')), '2026/09/27');
+	const canonicalOnly = `<link href="https://www.gocomics.com/aunty-acid/2013/05/06" rel="canonical">`;
+	assert.equal(Core.extractComicPageDate(canonicalOnly), '2013/05/06');
+	assert.equal(Core.extractComicPageDate('<html><title>GoComics</title></html>'), null);
+	assert.equal(Core.extractComicPageDate(`<meta property="og:url" content="https://www.gocomics.com/aunty-acid/2024/02/30">`), null);
+});
+
+test('resolveComicPage reports the day GoComics really served', () => {
+	assert.deepEqual(Core.resolveComicPage(datedPage('2026/09/25'), '2026/09/25'), { url: STRIP, date: '2026/09/25' });
+	// Requested 2026/09/28 before it was published: the page is for 2026/09/27
+	assert.deepEqual(Core.resolveComicPage(datedPage('2026/09/27'), '2026/09/28'), { url: STRIP, date: '2026/09/27' });
+	// Pages that don't say which day they are for are taken at face value
+	assert.deepEqual(Core.resolveComicPage(page(), '2020/01/01'), { url: STRIP, date: '2020/01/01' });
+});
+
+test('resolveComicPage only trusts the loose CDN fallback on the requested day\'s page', () => {
+	assert.deepEqual(Core.resolveComicPage(datedPage('2020/01/01', { og: null }), '2020/01/01'), { url: SITE_ASSET, date: '2020/01/01' });
+	assert.equal(Core.resolveComicPage(datedPage('2020/01/02', { og: null }), '2020/01/01').url, null);
+	// "No comic" pages (e.g. before the first strip) have neither og:url nor og:image
+	assert.equal(Core.resolveComicPage(`<html><title>GoComics</title><img src="${SITE_ASSET}"></html>`, '2013/05/05').url, null);
+	assert.equal(Core.resolveComicPage('', '2013/05/05').url, null);
+});
+
 test('adjacentDirection only reports neighbouring calendar days', () => {
 	const day = Core.parseYmd('2024-03-31');
 	assert.equal(Core.adjacentDirection(day, Core.parseYmd('2024-04-01')), 'next');

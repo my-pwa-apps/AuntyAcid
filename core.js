@@ -98,22 +98,63 @@
 	 */
 	function extractComicImageUrl(html) {
 		if (typeof html !== 'string' || !html) return null;
+		return extractOgImage(html) || extractCdnImage(html);
+	}
 
+	function metaContent(html, key) {
+		const keyPattern = new RegExp(`(?:property|name)\\s*=\\s*(["'])${key.replace(/[.:]/g, '\\$&')}\\1`, 'i');
+		const values = [];
 		// Accept property= or name=, either attribute order, and HTML-escaped ampersands.
 		for (const tag of html.match(/<meta\b[^>]*>/gi) || []) {
-			if (!/(?:property|name)\s*=\s*(["'])og:image\1/i.test(tag)) continue;
+			if (!keyPattern.test(tag)) continue;
 			const content = tag.match(/content\s*=\s*(["'])(.*?)\1/i);
-			const url = content && content[2].trim().replace(/&amp;/gi, '&');
-			if (url && isComicImageUrl(url)) return url;
+			if (content) values.push(content[2].trim().replace(/&amp;/gi, '&'));
 		}
+		return values;
+	}
 
+	function extractOgImage(html) {
+		return metaContent(html, 'og:image').find(isComicImageUrl) || null;
+	}
+
+	function extractCdnImage(html) {
 		let match = html.match(/https:\/\/featureassets\.gocomics\.com\/assets\/[a-f0-9]+/);
 		if (match) return match[0];
-
 		match = html.match(/https:\/\/assets\.amuniversal\.com\/[a-f0-9]+/);
-		if (match) return match[0];
+		return match ? match[0] : null;
+	}
 
+	/**
+	 * The date ("YYYY/MM/DD") a GoComics page is actually for, from og:url or the canonical link.
+	 * Dates without their own strip (not yet published, future) serve the latest comic instead.
+	 * @returns {string|null}
+	 */
+	function extractComicPageDate(html) {
+		if (typeof html !== 'string' || !html) return null;
+		const canonical = html.match(/<link\b[^>]*rel\s*=\s*["']canonical["'][^>]*>/i);
+		const candidates = [
+			...metaContent(html, 'og:url'),
+			...(canonical ? [(canonical[0].match(/href\s*=\s*(["'])(.*?)\1/i) || [])[2]] : [])
+		];
+		for (const url of candidates) {
+			const match = typeof url === 'string' && url.match(/\/(\d{4})\/(\d{2})\/(\d{2})(?:[/?#]|$)/);
+			if (match && parseYmd(`${match[1]}/${match[2]}/${match[3]}`)) return `${match[1]}/${match[2]}/${match[3]}`;
+		}
 		return null;
+	}
+
+	/**
+	 * Resolve a GoComics page fetched for `requestedYmd` ("YYYY/MM/DD").
+	 * `date` is the day the page is really for (defaults to the requested day when the page
+	 * doesn't say). The loose CDN fallback is only trusted on a page for the requested day,
+	 * because other pages (e.g. "no comic" pages) embed unrelated site-wide strips.
+	 * @returns {{url: string|null, date: string}}
+	 */
+	function resolveComicPage(html, requestedYmd) {
+		if (typeof html !== 'string' || !html) return { url: null, date: requestedYmd };
+		const pageDate = extractComicPageDate(html);
+		const url = extractOgImage(html) || (pageDate === requestedYmd ? extractCdnImage(html) : null);
+		return { url, date: pageDate || requestedYmd };
 	}
 
 	function isValidFavorite(value, minDate, maxDate) {
@@ -179,6 +220,8 @@
 		parseStoredDate,
 		isComicImageUrl,
 		extractComicImageUrl,
+		extractComicPageDate,
+		resolveComicPage,
 		isValidFavorite,
 		sanitizeFavorites,
 		safeJsonParse,
